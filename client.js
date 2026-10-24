@@ -2,11 +2,12 @@
  * Client 模块：官方插件详情页（Plugin Manager → ZCode Start Plan）里的
  * 「账号池管理」面板。
  *
- * ## 挂载点
+ * ## 挂载点（照抄 dsh-workbuddy-connect 的实证写法）
  *
- * `plugins.detail.section` 是官方插件页声明给贡献区块的座位
- * （root-scope list，随页面 `subject` 渲染在每个插件/条目详情页上）。
- * 本包只在该 subject 提到 `dsh-zcode-start-plan` 时渲染，其余插件页返回 null。
+ * `plugins.bundle.config` 是官方插件页按**包名 key 派发**的配置区块座位，
+ * 渲染在详情页「包含的组件」列表上方；宿主只在本包的详情页派发
+ * `key === 'dsh-zcode-start-plan'` 的条目，列表页则以 `view === 'summary'`
+ * 请求一行简介。组件无需自己做 subject 过滤。
  *
  * ## 数据通道
  *
@@ -29,36 +30,45 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const { useCallback, useEffect, useRef, useState } = React
 
-    const SLOT = 'plugins.detail.section'
+    const SLOT = 'plugins.bundle.config'
+    /** 宿主按包名派发此座位（workbuddy 实证：key 必须与安装的包名一字不差）。 */
+    const BUNDLE_KEY = 'dsh-zcode-start-plan'
     const API = '/api/zcode-start-plan'
     const CONFIRM_RESET_MS = 3000
 
     const CSS = `
-      .zsp-panel{display:flex;flex-direction:column;gap:10px;max-width:760px;color:var(--dsw-alias-label-primary);font-size:12.5px;line-height:18px}
+      .zsp-panel{display:flex;flex-direction:column;gap:10px;width:100%;min-width:0;color:var(--dsw-alias-label-primary);font-size:12.5px;line-height:18px}
       .zsp-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
       .zsp-title{margin:0;font-size:13px;font-weight:600;line-height:20px}
-      .zsp-muted{color:var(--dsw-alias-label-tertiary);font-size:12px;word-break:break-word}
+      .zsp-muted{color:var(--dsw-alias-label-tertiary);font-size:12px;word-break:break-word;min-width:0}
       .zsp-spacer{flex:1}
-      .zsp-btn{font:inherit;cursor:pointer;border:1px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm,6px);color:var(--dsw-alias-label-primary);background:transparent;padding:3px 10px;font-size:12px;line-height:18px}
+      .zsp-btn{font:inherit;cursor:pointer;border:1px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm,6px);color:var(--dsw-alias-label-primary);background:transparent;padding:3px 10px;font-size:12px;line-height:18px;flex:none}
       .zsp-btn:hover:enabled{background:var(--dsw-alias-interactive-bg-hover)}
       .zsp-btn:disabled{cursor:default;opacity:.55}
       .zsp-btn:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
       .zsp-btn[data-danger=true]{color:var(--dsw-alias-label-danger)}
       .zsp-error{color:var(--dsw-alias-label-danger);margin:0;font-size:12px;word-break:break-word}
       .zsp-ok{color:var(--dsw-alias-state-success-primary);font-size:12px;word-break:break-word;margin:0}
-      .zsp-card{display:flex;flex-direction:column;gap:6px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);border-radius:8px;padding:10px 12px}
+      .zsp-card{display:flex;flex-direction:column;gap:6px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);border-radius:8px;padding:10px 12px;min-width:0}
       .zsp-card[data-next=true]{border-color:var(--dsw-alias-state-business-primary)}
-      .zsp-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+      .zsp-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
       .zsp-dot{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-label-tertiary);flex:none}
       .zsp-dot[data-on=true]{background:var(--dsw-alias-state-success-primary)}
       .zsp-name{font-weight:600}
       .zsp-chip{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--dsw-alias-border-l1);border-radius:999px;padding:1px 8px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary)}
       .zsp-chip[data-limited=true]{color:var(--dsw-alias-label-danger);border-color:var(--dsw-alias-label-danger)}
-      .zsp-bar{height:6px;border-radius:3px;background:var(--dsw-alias-bg-layer-2);overflow:hidden}
+      .zsp-bar{height:6px;border-radius:3px;background:var(--dsw-alias-bg-layer-2);overflow:hidden;width:100%}
       .zsp-bar>span{display:block;height:100%;background:var(--dsw-alias-state-business-primary)}
       .zsp-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
-      .zsp-add{display:flex;flex-direction:column;gap:8px;border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;padding:10px 12px}
+      .zsp-add{display:flex;flex-direction:column;gap:8px;border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;padding:10px 12px;min-width:0}
       .zsp-link{color:var(--dsw-alias-state-business-primary);word-break:break-all}
+      @media (max-width: 520px){
+        .zsp-head{gap:6px}
+        .zsp-title{font-size:12.5px}
+        .zsp-card{padding:8px 10px}
+        .zsp-add{padding:8px 10px}
+        .zsp-actions{gap:4px}
+      }
     `
 
     /** 同源 API 调用；非 2xx 抛出服务端给的可读 error。 */
@@ -73,16 +83,6 @@ window.__ModuleLoader__.load({
         throw new Error(typeof data?.error === 'string' ? data.error : `HTTP ${response.status}`)
       }
       return data
-    }
-
-    /** 座位的 subject 是否指向本插件（对未知 subject 形状保持宽容）。 */
-    function isOurSubject(subject) {
-      if (subject === undefined || subject === null) return false
-      try {
-        return JSON.stringify(subject).includes('dsh-zcode-start-plan')
-      } catch {
-        return false
-      }
     }
 
     function channelLabel(channel) {
@@ -343,7 +343,11 @@ window.__ModuleLoader__.load({
     /**
      * 面板主体。
      *
-     * ⚠ Hooks 全部先于 `isOurSubject` 早退调用（React hooks 顺序约束）。
+     * 宿主以两种 view 调用（workbuddy 实证）：
+     * - `view === 'summary'`：插件列表页的一行简介，返回纯文本；
+     * - 其余：详情页完整面板。
+     *
+     * ⚠ Hooks 全部先于 summary 早退调用（React hooks 顺序约束）。
      */
     function Panel(props) {
       const [data, setData] = useState(undefined)
@@ -414,7 +418,10 @@ window.__ModuleLoader__.load({
         [load],
       )
 
-      if (!isOurSubject(props && props.subject)) return null
+      /** 插件列表页的摘要视图：一行文本，不发起请求。 */
+      if ((props || {}).view === 'summary') {
+        return '管理 ZCode 赠送免费 plan 的账号池：选择使用的账号、查看余额与限流、面板内登录添加账号（bigmodel / z.ai）。'
+      }
 
       const accounts = data !== undefined && Array.isArray(data.accounts) ? data.accounts : undefined
       /** 「按序下一个」= 列表里第一个启用的账号（pool.pick 的取号规则）。 */
@@ -473,7 +480,8 @@ window.__ModuleLoader__.load({
       inject: ['slots'],
       apply(ctx) {
         ctx.slots.inject(SLOT, () =>
-          ctx.slots.register({ name: SLOT, id: 'zcode-start-plan-accounts', order: 50 }, Panel),
+          /** key = 包名：宿主只在 dsh-zcode-start-plan 的详情页派发本条目。 */
+          ctx.slots.register({ name: SLOT, key: BUNDLE_KEY }, Panel),
         )
       },
     }
