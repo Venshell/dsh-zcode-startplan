@@ -32,7 +32,12 @@ zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages（直连）
 
 ## 安装
 
-### 方式一：npm（推荐）
+### 方式一：插件页直接装（最简单）
+
+DSH Web UI 的插件页支持直接按 **npm 包名**安装：打开插件管理页 → 安装/添加插件 →
+输入 `dsh-zcode-startplan` → 确认。宿主会自己从 npm 拉取并登记，无需任何命令行。
+
+### 方式二：npm CLI 安装
 
 包发布在 npm：[`dsh-zcode-startplan`](https://www.npmjs.com/package/dsh-zcode-startplan)。
 
@@ -49,7 +54,7 @@ $pkgDir = "$(npm root -g)\dsh-zcode-startplan"
 # 在 DSH 会话里：plugin_manager install_bundle，target = $pkgDir
 ```
 
-### 方式二：从源码目录
+### 方式三：从源码目录
 
 ```powershell
 git clone https://github.com/Venshell/dsh-zcode-startplan.git
