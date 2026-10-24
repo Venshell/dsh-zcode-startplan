@@ -221,3 +221,16 @@ test('工具参数是原始 JSON 字符串（宿主不做解析）', () => {
   assert.equal(typeof tool.arguments, 'string')
   assert.deepEqual(JSON.parse(tool.arguments), { cmd: 'ls' })
 })
+
+test('宿主 assembler 接收只有内联 input 的工具调用且参数不丢失', () => {
+  const { blocks } = runThrough([
+    { data: { type: 'content_block_start', index: 0, content_block: {
+      type: 'tool_use', id: 'toolu_inline', name: 'pwsh',
+      input: { description: '列出文件', command: 'Get-ChildItem' },
+    } } },
+    { data: { type: 'content_block_stop', index: 0 } },
+  ])
+  assert.deepEqual(JSON.parse(blocks[0].arguments), {
+    description: '列出文件', command: 'Get-ChildItem',
+  })
+})

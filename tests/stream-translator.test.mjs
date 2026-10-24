@@ -55,6 +55,36 @@ test('tool_use：参数以原始 JSON 字符串增量下发，stop_reason=tool_u
   assert.equal(out[out.length - 1].reason, 'tool-calls')
 })
 
+test('tool_use：只有 start 内联 input 时，结束块保留完整工具参数', () => {
+  const translator = new AnthropicStreamTranslator()
+  translator.push(ev('content_block_start', {
+    index: 0,
+    content_block: { type: 'tool_use', id: 'toolu_inline', name: 'pwsh',
+      input: { description: '列出文件', command: 'Get-ChildItem' } },
+  }))
+  const out = translator.push(ev('content_block_stop', { index: 0 }))
+  assert.deepEqual(JSON.parse(out[0].block.arguments), {
+    description: '列出文件', command: 'Get-ChildItem',
+  })
+})
+
+test('tool_use：同时有内联 input 和 JSON 增量时，以完整增量为准', () => {
+  const translator = new AnthropicStreamTranslator()
+  translator.push(ev('content_block_start', {
+    index: 0,
+    content_block: { type: 'tool_use', id: 'toolu_delta', name: 'pwsh',
+      input: { description: '旧值', command: 'old' } },
+  }))
+  translator.push(ev('content_block_delta', {
+    index: 0, delta: { type: 'input_json_delta', partial_json: '{"description":"新值",' },
+  }))
+  translator.push(ev('content_block_delta', {
+    index: 0, delta: { type: 'input_json_delta', partial_json: '"command":"new"}' },
+  }))
+  const out = translator.push(ev('content_block_stop', { index: 0 }))
+  assert.deepEqual(JSON.parse(out[0].block.arguments), { description: '新值', command: 'new' })
+})
+
 test('thinking → reasoning-delta', () => {
   const translator = new AnthropicStreamTranslator()
   const out = []

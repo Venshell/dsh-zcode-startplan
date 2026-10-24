@@ -106,6 +106,25 @@ test('buildUpstreamBody: DSH 工具调用/结果翻成 Anthropic 块', () => {
   assert.equal(body.tools[0].cache_control.type, 'ephemeral')
 })
 
+test('buildUpstreamBody: 回放宿主保存的 JSON 字符串工具参数时，tool_use.input 必须是对象', () => {
+  const body = buildUpstreamBody({
+    options: {
+      model: 'GLM-5.3-Flash',
+      messages: [
+        userMessage('运行命令'),
+        { role: 'assistant', content: [{
+          type: 'tool-call', id: 'call_pwsh', name: 'pwsh',
+          arguments: '{"description":"列出文件","command":"Get-ChildItem","options":{"cwd":"C:/w"}}',
+        }] },
+      ],
+    },
+    now: new Date(2026, 9, 24),
+  })
+  assert.deepEqual(body.messages[1].content[0].input, {
+    description: '列出文件', command: 'Get-ChildItem', options: { cwd: 'C:/w' },
+  })
+})
+
 test('buildUpstreamBody: 不向历史回放思考块', () => {
   const body = buildUpstreamBody({
     options: {
