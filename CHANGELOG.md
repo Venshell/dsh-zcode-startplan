@@ -3,6 +3,50 @@
 本文件记录**每次修复背后的宿主契约**。只看 diff 看不出「为什么不能改回去」，
 所以把约束与症状一起写下来。
 
+## 2026-10-24 — 适配 dsh 0.2.1-rc.3：finish chunk 形状修正
+
+### rc.2 → rc.3 差异审查结论
+
+对插件触达的全部宿主包（`dsh-llm` / `dsh-tools` / `cordis` / `cordis-plugin-loader` /
+`cordis-plugin-timer` / `dsh-host-webserver` / `dsh-llm-pi-ai` / `dsh-llm-retry` /
+`dsh-client-ui-renderer` / `dsh-client-ui-plugin-manager` / `schemastery` / `cosmokit`）
+做了 rc.2 与 rc.3 的全量 `.js` SHA256 对比：**运行时零差异**。rc.3 只是补齐
+`.d.ts` 类型声明 —— 所以本次「适配」的实质是：用官方类型把此前靠猜的契约钉死，
+修正其中一处不一致。`peerDependencies` 抬到 `^0.2.1-rc.3`（includePrerelease 语义下
+该区间继续覆盖同族的后续 rc）。
+
+### finish chunk 形状（修复点）
+
+官方 `FinishReasonMap`（`dsh-llm/lib/types/types.d.ts`，rc.3 新增）钉死终止块契约：
+
+```
+{ type: 'finish', reason: FinishReason }
+FinishReason =
+  { kind: 'stop' } | { kind: 'tool-calls' } | { kind: 'max-tokens' }
+| { kind: 'aborted', failure } | { kind: 'error', failure }
+```
+
+- 宿主 `BlockAssembler` 读 **`chunk.reason`**（`this._finish = chunk.reason`），
+  agent-loop 再按 `finish.kind === 'error' | 'aborted'` 判错。
+- 之前发的是 `{ kind: 'error', failure }`（kind 在顶层、没有 `reason` 包裹）：
+  宿主读到 `reason === undefined` → 默认 `{ kind: 'stop' }` ——
+  **流内错误被静默吞成正常结束**，重试与错误上报全部失效。正常路径碰巧能跑
+  （`undefined.kind` 不落入错误分支），所以一直没暴露。
+- 修复：`stream-translator.js` 的 `finish()` / `mapStopReason()` 与
+  `adapter.js` 的 catch 路径统一改为 `reason` 包裹对象；
+  `mapStopReason` 返回 `{ kind: 'max-tokens' }` 等对象（此前返回 `'length'`
+  这类字符串，且 `'length'` 不是合法 kind —— 宿主的合法值是 `'max-tokens'`）。
+- 契约级测试（`tests/assembler-contract.test.mjs`）新增断言：
+  `finish.kind` 必须为 undefined（kind 只能在 `reason` 里）。
+
+### rc.3 类型文档揭示的可选能力（暂不用，留档）
+
+- `AdapterRegistrationHandle.replace(providers)`：原子换路由，将来配置热改可省
+  「先撤销再注册」的空窗；
+- `LlmResolvedModelInfo.systemPromptUpdate: 'in-history'`：若上游确认改 system
+  不破缓存，声明它可改善长会话缓存命中；
+- `TokenUsage.totalTokens` / `reasoningTokens`：可选补全用量字段。
+
 ## 2026-10-24 — 工具调用参数保真
 
 - 历史回放中，DSH 保存的工具参数是原始 JSON 字符串；发给 Anthropic Messages 上游前必须转成 `tool_use.input` 对象。

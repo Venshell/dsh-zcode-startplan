@@ -281,6 +281,10 @@ case "block-end":       partial.block = chunk.block
 - `block-start` 用 **`blockType`（字符串）**，**不是** `block`（对象）
 - `block-end` **必须带完整 `block`**（`assemble()` 直接返回它）
 - `tool-call-delta` 的字段名是 `id` / `name` / **`argumentsDelta`**
+- `finish` 的 kind 必须包在 **`reason` 对象**里：
+  `{ type: 'finish', reason: { kind: 'stop' } | { kind: 'error', failure } | … }`
+  （`FinishReasonMap`，rc.3 的 `.d.ts` 钉死）。宿主读 `chunk.reason`，
+  kind 放顶层时**不炸但静默出错** —— 流内错误被吞成「正常结束」。
 
 形状不对的症状：宿主 `chunk.block.type` 解引用 `undefined` →
 `Cannot read properties of undefined (reading 'type')`。

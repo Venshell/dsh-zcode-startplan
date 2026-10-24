@@ -37,7 +37,7 @@ for (const [name, range] of Object.entries(peers)) {
   /** prerelease 陷阱：区间里没有 prerelease 段时，rc 版会被判为不满足。 */
   if (/^\^?\d+\.\d+\.\d+$/.test(range)) {
     notes.push(
-      `${name}: "${range}" 不含 prerelease 段；若宿主是 0.x 的 rc 版本会被判不兼容（建议写成 "^0.2.0-rc.2" 这类）`,
+      `${name}: "${range}" 不含 prerelease 段；若宿主是 0.x 的 rc 版本会被判不兼容（建议写成 "^0.2.1-rc.3" 这类）`,
     )
   }
 }

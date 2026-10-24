@@ -24,7 +24,8 @@ test('text 块：block-start → text-delta → block-end，最后 usage → fin
   ])
   assert.equal(out[1].text, 'Hi')
   assert.deepEqual(out[3].usage, { inputTokens: 11, outputTokens: 7, cacheReadTokens: 0, cacheWriteTokens: 0 })
-  assert.deepEqual(out[4], { type: 'finish', kind: 'stop', reason: 'stop' })
+  /** 官方契约：finish.reason 是对象（FinishReasonMap），宿主 BlockAssembler 读 chunk.reason。 */
+  assert.deepEqual(out[4], { type: 'finish', reason: { kind: 'stop' } })
 })
 
 test('tool_use：参数以原始 JSON 字符串增量下发，stop_reason=tool_use → tool-calls', () => {
@@ -52,7 +53,7 @@ test('tool_use：参数以原始 JSON 字符串增量下发，stop_reason=tool_u
   /** block-end 必须带完整 block。 */
   const end = out.find((chunk) => chunk.type === 'block-end')
   assert.deepEqual(end.block, { type: 'tool-call', id: 'toolu_1', name: 'pwsh', arguments: '{"cmd":"ls"}' })
-  assert.equal(out[out.length - 1].reason, 'tool-calls')
+  assert.equal(out[out.length - 1].reason.kind, 'tool-calls')
 })
 
 test('tool_use：只有 start 内联 input 时，结束块保留完整工具参数', () => {
@@ -109,10 +110,12 @@ test('流内 error 事件 → terminal finish 错误 chunk（带稳定失败码�
   const translator = new AnthropicStreamTranslator()
   translator.push(ev('error', { error: { type: 'api_error', message: '{"code":3012,"msg":"unusual activity"}' } }))
   const out = translator.finish()
-  assert.equal(out[out.length - 1].type, 'finish')
-  assert.equal(out[out.length - 1].kind, 'error')
-  assert.equal(out[out.length - 1].failure.code, 'RATE_LIMIT')
-  assert.match(out[out.length - 1].failure.message, /3012/)
+  const finish = out[out.length - 1]
+  assert.equal(finish.type, 'finish')
+  /** 宿主读 chunk.reason（BlockAssembler: this._finish = chunk.reason）。 */
+  assert.deepEqual(finish.reason, { kind: 'error', failure: { code: 'RATE_LIMIT', message: finish.reason.failure.message } })
+  assert.equal(finish.reason.failure.code, 'RATE_LIMIT')
+  assert.match(finish.reason.failure.message, /3012/)
 })
 
 test('finish 之前必定先发 usage（DSH 协议顺序）', () => {
@@ -122,8 +125,11 @@ test('finish 之前必定先发 usage（DSH 协议顺序）', () => {
 })
 
 test('mapStopReason / mapErrorCode', () => {
-  assert.equal(mapStopReason('max_tokens'), 'length')
-  assert.equal(mapStopReason('end_turn'), 'stop')
+  /** mapStopReason 返回 FinishReasonMap 形态的 reason 对象。 */
+  assert.deepEqual(mapStopReason('max_tokens'), { kind: 'max-tokens' })
+  assert.deepEqual(mapStopReason('tool_use'), { kind: 'tool-calls' })
+  assert.deepEqual(mapStopReason('end_turn'), { kind: 'stop' })
+  assert.deepEqual(mapStopReason('unknown'), { kind: 'stop' })
   assert.equal(mapErrorCode({ message: '{"code":1005}' }), 'QUOTA')
   assert.equal(mapErrorCode({ message: 'token expired' }), 'AUTH')
   assert.equal(mapErrorCode({ type: 'rate_limit_error', message: 'x' }), 'RATE_LIMIT')

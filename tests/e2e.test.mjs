@@ -95,7 +95,8 @@ test('adapter.stream：产出合法的 DSH chunk 序列（以 usage + finish 收
     chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join(''),
     '## 交付物\n好的',
   )
-  assert.equal(chunks[chunks.length - 1].kind, 'stop')
+  /** finish.reason 是对象（FinishReasonMap），宿主 BlockAssembler 读 chunk.reason。 */
+  assert.deepEqual(chunks[chunks.length - 1].reason, { kind: 'stop' })
   assert.equal(chunks[chunks.length - 2].usage.outputTokens, 2)
 })
 
@@ -113,9 +114,10 @@ test('adapter.stream：上游失败时以 terminal finish 错误 chunk 收尾（
   for await (const chunk of adapter.stream(streamOptions)) chunks.push(chunk)
   const finish = chunks[chunks.length - 1]
   assert.equal(finish.type, 'finish')
-  assert.equal(finish.kind, 'error')
-  assert.equal(finish.failure.code, 'RATE_LIMIT')
-  assert.match(finish.failure.message, /3012/)
+  /** 宿主读 chunk.reason（BlockAssembler）；kind 在顶层会被吞成正常结束。 */
+  assert.equal(finish.reason.kind, 'error')
+  assert.equal(finish.reason.failure.code, 'RATE_LIMIT')
+  assert.match(finish.reason.failure.message, /3012/)
 })
 
 test('adapter.listModels / resolveModel：模型元数据带上下文窗口与输入模态', async (t) => {

@@ -16,9 +16,9 @@
  *   - `block-end` **必须带 `block`**（assemble 直接返回它）；
  *   - `tool-call-delta` 的字段名是 `id` / `name` / **`argumentsDelta`**。
  *
- * 之前我发的是 `{ block: {...} }` / `{ arguments }` —— `blockType` 读到 undefined，
- * 宿主 `partial.block.type` 解引用即抛
- * `Cannot read properties of undefined (reading 'type')`。
+ * 另有一处「不炸但静默出错」的形状：`finish` 块的 kind 必须包在 **`reason`
+ * 对象**里（`{ type: 'finish', reason: { kind, failure? } }`）—— 宿主
+ * `BlockAssembler` 读 `chunk.reason`；kind 放顶层时错误会被吞成正常结束。
  */
 
 import test from 'node:test'
@@ -164,6 +164,26 @@ test('宿主 assembler 能完整组装思考型模型的三种块（reasoning/te
     { type: 'text', text: '答案' },
     { type: 'tool-call', id: 'toolu_1', name: 'pwsh', arguments: '{"cmd":"ls"}' },
   ])
+})
+
+test('finish.reason 必须是 FinishReasonMap 形态的对象（宿主读 chunk.reason）', () => {
+  /**
+   * 宿主 `BlockAssembler`：`case "finish": this._finish = chunk.reason`。
+   * agent-loop 再按 `finish.kind === 'error' | 'aborted'` 判错。
+   * kind 放顶层（没有 reason 包裹）时，宿主读到 undefined → 默认 `{ kind: 'stop' }`，
+   * 流内错误被静默吞成正常结束。
+   */
+  const { chunks } = runThrough(thinkingModelStream())
+  const finish = chunks.find((c) => c.type === 'finish')
+  assert.equal(finish.kind, undefined, 'kind 必须在 reason 里，不能放顶层')
+  assert.deepEqual(finish.reason, { kind: 'tool-calls' })
+
+  /** 流内错误同样要包在 reason 里，且带稳定 failure 码。 */
+  const translator = new AnthropicStreamTranslator()
+  translator.push({ data: { type: 'error', error: { type: 'api_error', message: '{"code":3012}' } } })
+  const errFinish = translator.finish().find((c) => c.type === 'finish')
+  assert.equal(errFinish.reason.kind, 'error')
+  assert.equal(errFinish.reason.failure.code, 'RATE_LIMIT')
 })
 
 test('block-start 必须带 blockType 字符串（不是 block 对象）', () => {
