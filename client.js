@@ -62,6 +62,24 @@ window.__ModuleLoader__.load({
       .zsp-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
       .zsp-add{display:flex;flex-direction:column;gap:8px;border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;padding:10px 12px;min-width:0}
       .zsp-link{color:var(--dsw-alias-state-business-primary);word-break:break-all}
+      .zsp-select{position:relative;display:inline-flex;min-width:0}
+      .zsp-select-trigger{display:inline-flex;align-items:center;gap:8px;font:inherit;cursor:pointer;border:1px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm,6px);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);padding:4px 10px;font-size:12px;line-height:18px;min-width:0}
+      .zsp-select-trigger:hover{background:var(--dsw-alias-interactive-bg-hover)}
+      .zsp-select-trigger:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
+      .zsp-select-trigger[aria-expanded=true]{border-color:var(--dsw-alias-state-business-primary)}
+      .zsp-select-label{font-weight:600;white-space:nowrap}
+      .zsp-select-desc{color:var(--dsw-alias-label-tertiary);font-size:11px;white-space:nowrap}
+      .zsp-caret{flex:none;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid var(--dsw-alias-label-tertiary);transition:transform .15s ease}
+      .zsp-select-trigger[aria-expanded=true] .zsp-caret{transform:rotate(180deg)}
+      .zsp-select-menu{position:absolute;top:calc(100% + 4px);left:0;z-index:30;display:flex;flex-direction:column;gap:2px;min-width:100%;max-height:260px;overflow:auto;padding:4px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-2);box-shadow:0 8px 24px rgb(0 0 0 / 18%);animation:zsp-pop .14s ease}
+      @keyframes zsp-pop{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+      .zsp-option{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;cursor:pointer;color:var(--dsw-alias-label-primary);font-size:12px;line-height:18px;border:0;background:transparent;text-align:left;width:100%}
+      .zsp-option:hover,.zsp-option[data-active=true]{background:var(--dsw-alias-interactive-bg-hover)}
+      .zsp-option[aria-selected=true]{background:var(--dsw-alias-interactive-bg-selected,var(--dsw-alias-interactive-bg-hover))}
+      .zsp-option-check{flex:none;color:var(--dsw-alias-state-business-primary);font-size:12px;visibility:hidden}
+      .zsp-option[aria-selected=true] .zsp-option-check{visibility:visible}
+      .zsp-option-text{display:flex;flex-direction:column;min-width:0}
+      .zsp-badge{flex:none;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:5px;font-size:10px;font-weight:700;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
       @media (max-width: 520px){
         .zsp-head{gap:6px}
         .zsp-title{font-size:12.5px}
@@ -199,6 +217,100 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 渠道选项（登录渠道与 lib/upstream-api.js 的 LOGIN_CHANNELS 对齐）。
+     */
+    const CHANNEL_OPTIONS = [
+      { value: 'bigmodel', label: '智谱国内', desc: 'bigmodel.cn', badge: '智' },
+      { value: 'zai', label: 'Z.AI 国际', desc: 'z.ai', badge: 'Z' },
+    ]
+
+    /**
+     * 现代化下拉（零依赖手写）：渠道徽标 + 两行选项 + hover 高亮 +
+     * 点击外部关闭；不做键盘导航（用不到，从简）。
+     */
+    function ChannelSelect(props) {
+      const { value, onChange, disabled } = props
+      const [open, setOpen] = useState(false)
+      const rootRef = useRef(undefined)
+
+      const selected = CHANNEL_OPTIONS.find((item) => item.value === value) ?? CHANNEL_OPTIONS[0]
+
+      useEffect(() => {
+        if (open !== true) return undefined
+        const onPointerDown = (event) => {
+          if (rootRef.current !== undefined && !rootRef.current.contains(event.target)) setOpen(false)
+        }
+        document.addEventListener('pointerdown', onPointerDown, true)
+        return () => document.removeEventListener('pointerdown', onPointerDown, true)
+      }, [open])
+
+      const commit = useCallback(
+        (nextValue) => {
+          if (!CHANNEL_OPTIONS.some((item) => item.value === nextValue)) return
+          onChange(nextValue)
+          setOpen(false)
+        },
+        [onChange],
+      )
+
+      const onKeyDown = useCallback(
+        (event) => {
+          /** 键盘只保留 Esc 关闭（一般用不到键盘选渠道，从简）。 */
+          if (event.key === 'Escape') setOpen(false)
+          else if (event.key === 'Tab') setOpen(false)
+        },
+        [],
+      )
+
+      return h(
+        'div',
+        { className: 'zsp-select', ref: rootRef, onKeyDown },
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'zsp-select-trigger',
+            'aria-haspopup': 'listbox',
+            'aria-expanded': open === true,
+            disabled,
+            onClick: () => setOpen((current) => !current),
+          },
+          h('span', { className: 'zsp-badge' }, selected.badge),
+          h('span', { className: 'zsp-select-label' }, selected.label),
+          h('span', { className: 'zsp-select-desc' }, selected.desc),
+          h('span', { className: 'zsp-caret', 'aria-hidden': 'true' }),
+        ),
+        open === true
+          ? h(
+              'div',
+              { className: 'zsp-select-menu', role: 'listbox', 'aria-label': '登录渠道' },
+              CHANNEL_OPTIONS.map((option) =>
+                h(
+                  'button',
+                  {
+                    key: option.value,
+                    type: 'button',
+                    role: 'option',
+                    className: 'zsp-option',
+                    'aria-selected': option.value === value,
+                    onClick: () => commit(option.value),
+                  },
+                  h('span', { className: 'zsp-badge' }, option.badge),
+                  h(
+                    'span',
+                    { className: 'zsp-option-text' },
+                    h('span', null, option.label),
+                    h('span', { className: 'zsp-select-desc' }, option.desc),
+                  ),
+                  h('span', { className: 'zsp-option-check', 'aria-hidden': 'true' }, '✓'),
+                ),
+              ),
+            )
+          : null,
+      )
+    }
+
+    /**
      * 「添加账号」区块：渠道选择 → 发起授权 → 展示授权链接 → 轮询直到 ready。
      *
      * 两段式设备授权与 CLI 相同：Host 持 flowSecret，Client 只拿 authorizeUrl
@@ -297,17 +409,11 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'zsp-row' },
           h('span', { className: 'zsp-name' }, '添加账号'),
-          h(
-            'select',
-            {
-              className: 'zsp-btn',
-              value: channel,
-              disabled: busy || phase === 'starting' || phase === 'waiting',
-              onChange: (event) => setChannel(event.target.value),
-            },
-            h('option', { value: 'bigmodel' }, '智谱国内（bigmodel.cn）'),
-            h('option', { value: 'zai' }, 'Z.AI 国际（z.ai）'),
-          ),
+          h(ChannelSelect, {
+            value: channel,
+            onChange: setChannel,
+            disabled: busy || phase === 'starting' || phase === 'waiting',
+          }),
           phase === 'waiting' || phase === 'starting'
             ? h('button', { className: 'zsp-btn', onClick: cancel }, '取消')
             : h(
