@@ -152,9 +152,6 @@ window.__ModuleLoader__.load({
                   ),
                 )
             : h('span', { className: 'zsp-error' }, balance.error ?? '余额查询失败'),
-        typeof account.lastError === 'string' && account.lastError.length > 0
-          ? h('span', { className: 'zsp-muted' }, `最近错误：${account.lastError}`)
-          : null,
         h(
           'div',
           { className: 'zsp-actions' },
