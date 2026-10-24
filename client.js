@@ -55,6 +55,11 @@ window.__ModuleLoader__.load({
       .zsp-dot{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-label-tertiary);flex:none}
       .zsp-dot[data-on=true]{background:var(--dsw-alias-state-success-primary)}
       .zsp-name{font-weight:600}
+      .zsp-name-edit{font:inherit;font-weight:600;color:inherit;background:transparent;border:0;padding:0;cursor:text;text-align:left}
+      .zsp-name-edit:hover:enabled{text-decoration:underline dotted var(--dsw-alias-label-tertiary)}
+      .zsp-name-edit:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
+      .zsp-name-input{font:inherit;font-weight:600;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-state-business-primary);border-radius:4px;padding:1px 6px;width:180px;max-width:100%}
+      .zsp-name-input:focus-visible{outline:none}
       .zsp-chip{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--dsw-alias-border-l1);border-radius:999px;padding:1px 8px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary)}
       .zsp-chip[data-limited=true]{color:var(--dsw-alias-label-danger);border-color:var(--dsw-alias-label-danger)}
       .zsp-bar{height:6px;border-radius:3px;background:var(--dsw-alias-bg-layer-2);overflow:hidden;width:100%}
@@ -103,10 +108,11 @@ window.__ModuleLoader__.load({
       return data
     }
 
+    /** 渠道显示名：直接用官方 provider id（zai / bigmodel），不做本地化称呼。 */
     function channelLabel(channel) {
-      if (channel === 'zai') return 'Z.AI 国际'
-      if (channel === 'bigmodel') return '智谱国内'
-      return channel === null || channel === undefined ? '渠道未标注' : String(channel)
+      if (channel === 'zai') return 'zai'
+      if (channel === 'bigmodel') return 'bigmodel'
+      return channel === null || channel === undefined ? 'bigmodel' : String(channel)
     }
 
     function formatReset(resetAt) {
@@ -116,11 +122,64 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 单个账号卡片：状态点、昵称、渠道、限流 chips、余额条、操作按钮。
+     * 卡片标题行的可编辑昵称：点一下变输入框，Enter 提交 / Esc 或失焦取消。
+     * 什么都不填直接失焦 = 不改名。
+     */
+    function NicknameEdit(props) {
+      const { nickname, busy, onCommit } = props
+      const [editing, setEditing] = useState(false)
+      const [draft, setDraft] = useState(nickname)
+      const inputRef = useRef(undefined)
+
+      useEffect(() => {
+        if (editing === true) {
+          setDraft(nickname)
+          /** 进入编辑态后自动聚焦并全选，方便整段替换。 */
+          inputRef.current?.focus()
+          inputRef.current?.select()
+        }
+      }, [editing, nickname])
+
+      if (editing !== true) {
+        return h(
+          'button',
+          {
+            type: 'button',
+            className: 'zsp-name zsp-name-edit',
+            title: '点击重命名',
+            disabled: busy,
+            onClick: () => setEditing(true),
+          },
+          nickname,
+        )
+      }
+      return h('input', {
+        ref: inputRef,
+        className: 'zsp-name-input',
+        value: draft,
+        disabled: busy,
+        maxLength: 40,
+        'aria-label': '账号备注',
+        onChange: (event) => setDraft(event.target.value),
+        onKeyDown: (event) => {
+          if (event.key === 'Enter') {
+            const next = draft.trim()
+            if (next.length > 0 && next !== nickname) onCommit(next)
+            setEditing(false)
+          } else if (event.key === 'Escape') {
+            setEditing(false)
+          }
+        },
+        onBlur: () => setEditing(false),
+      })
+    }
+
+    /**
+     * 单个账号卡片：状态点、可编辑昵称、渠道、限流 chips、余额条、操作按钮。
      * 按钮只有两个：「使用」（置顶，下次请求即用它）与「删除」。
      */
     function AccountCard(props) {
-      const { account, balance, busy, isNext, confirmId, setConfirmId, onUse, onRemove } = props
+      const { account, balance, busy, isNext, confirmId, setConfirmId, onUse, onRemove, onRename } = props
       /** Host 下发的是 `modelRateLimits` 对象（model → resetAt），摊平成 chips。 */
       const limited = Object.entries(account.modelRateLimits ?? {})
         .map(([model, resetAt]) => ({ model, resetAt }))
@@ -140,11 +199,15 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'zsp-row' },
           h('span', { className: 'zsp-dot', 'data-on': account.enabled === true }),
-          h('span', { className: 'zsp-name' }, account.nickname),
+          h(NicknameEdit, {
+            nickname: account.nickname,
+            busy,
+            onCommit: (next) => onRename(next),
+          }),
           h(
             'span',
             { className: 'zsp-muted' },
-            `#${account.index} · ${channelLabel(account.channel)} · ID 尾 ${account.userIdTail ?? '??????'}`,
+            `#${account.index} · ${channelLabel(account.channel)}`,
           ),
           limited.map((item) =>
             h(
@@ -220,8 +283,8 @@ window.__ModuleLoader__.load({
      * 渠道选项（登录渠道与 lib/upstream-api.js 的 LOGIN_CHANNELS 对齐）。
      */
     const CHANNEL_OPTIONS = [
-      { value: 'bigmodel', label: '智谱国内', desc: 'bigmodel.cn', badge: '智' },
-      { value: 'zai', label: 'Z.AI 国际', desc: 'z.ai', badge: 'Z' },
+      { value: 'bigmodel', label: 'bigmodel', desc: '智谱开放平台 · bigmodel.cn', badge: '智' },
+      { value: 'zai', label: 'zai', desc: 'Z.AI · z.ai', badge: 'Z' },
     ]
 
     /**
@@ -569,6 +632,7 @@ window.__ModuleLoader__.load({
                 setConfirmId,
                 onUse: () => void act('/use', { id: account.id }),
                 onRemove: () => void act('/remove', { id: account.id }),
+                onRename: (nickname) => void act('/rename', { id: account.id, nickname }),
               }),
             )
           : null,
