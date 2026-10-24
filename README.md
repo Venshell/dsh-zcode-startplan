@@ -10,6 +10,10 @@
   但形态不同——它做的是 ZCode 插件（本地代理），这里直接实现 **`ctx.llm` 适配器**，
   选号、captcha、切号、重试全在 DSH 进程内完成
 
+[![npm](https://img.shields.io/npm/v/dsh-zcode-startplan)](https://www.npmjs.com/package/dsh-zcode-startplan)
+[![license](https://img.shields.io/npm/l/dsh-zcode-startplan)](./LICENSE)
+[![release](https://img.shields.io/github/v/release/Venshell/dsh-zcode-startplan)](https://github.com/Venshell/dsh-zcode-startplan/releases)
+
 ```
 DSH agent-loop
    │ ctx.llm.stream({ provider: 'zcode-start-plan', model: 'GLM-5.3', … })
@@ -28,7 +32,29 @@ zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages（直连）
 
 ## 安装
 
+### 方式一：npm（推荐）
+
+包发布在 npm：[`dsh-zcode-startplan`](https://www.npmjs.com/package/dsh-zcode-startplan)。
+
 ```powershell
+# 全局安装后得到 zcode-start-plan 命令（CLI 可独立于 DSH 使用：login / list / status）
+npm install -g dsh-zcode-startplan
+```
+
+把它装进 DSH profile：在 DSH 会话里调用官方安装器，`target` 传 npm 全局包的
+实际目录（`npm root -g` 拼上包名）：
+
+```powershell
+$pkgDir = "$(npm root -g)\dsh-zcode-startplan"
+# 在 DSH 会话里：plugin_manager install_bundle，target = $pkgDir
+```
+
+### 方式二：从源码目录
+
+```powershell
+git clone https://github.com/Venshell/dsh-zcode-startplan.git
+cd dsh-zcode-startplan
+
 # 1. 放到 plugins 目录
 $dst = "$env:USERPROFILE\.dsh\plugins\dsh-zcode-startplan"
 robocopy . $dst /E /XD node_modules .git
