@@ -18,6 +18,7 @@
   "main": "./index.js",
   "exports": {
     ".": "./index.js",
+    "./client": "./client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json",
@@ -25,6 +26,7 @@
   },
   "files": [
     "index.js",
+    "client.js",
     "lib",
     "bin",
     "scripts",
@@ -61,6 +63,13 @@
     "permissions": "模型供应商接入, 账号池管理",
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ]
     }
   }
 }

@@ -233,11 +233,12 @@ test('apply：等 llm 出现后注册 adapter + 状态工具，dispose 时收尾
   const tools = []
   const disposers = []
   const intervals = []
+  const routes = []
   /**
    * 宿主的 `ctx` 是**沙箱 façade**：只暴露 `inject` 声明过的服务。
    * 实测（一次性诊断插件）：`Object.keys(ctx)` 仅 `['fiber']`；
    * 碰未声明的服务直接抛 `cannot get property "tools" without inject`。
-   * 因此这里按插件的 `inject` 列表（llm/tools/timer）提供服务，
+   * 因此这里按插件的 `inject` 列表（llm/tools/timer/webServer）提供服务，
    * 并**不提供** `emit` / `on` / `setInterval` / `inject` —— 沙箱里没有它们。
    */
   const ctx = {
@@ -254,6 +255,12 @@ test('apply：等 llm 出现后注册 adapter + 状态工具，dispose 时收尾
     timer: {
       interval: (callback, delay) => {
         intervals.push(delay)
+        return () => {}
+      },
+    },
+    webServer: {
+      register: (route) => {
+        routes.push(route)
         return () => {}
       },
     },

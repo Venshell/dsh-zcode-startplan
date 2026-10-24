@@ -3,6 +3,63 @@
 本文件记录**每次修复背后的宿主契约**。只看 diff 看不出「为什么不能改回去」，
 所以把约束与症状一起写下来。
 
+## 2026-10-24 — 工具调用参数保真
+
+- 历史回放中，DSH 保存的工具参数是原始 JSON 字符串；发给 Anthropic Messages 上游前必须转成 `tool_use.input` 对象。
+- 流式 `tool_use` 的 `content_block_start.input` 可以直接携带完整参数；没有后续 JSON 增量时必须保留它，有增量时以增量为准。
+- 定向回归测试覆盖上述两种形态。长会话中的实际效果仍需在 DSH 运行时验收。
+
+## 0.2.0 — 账号池管理面板
+
+在 Web UI 的官方插件详情页提供账号池的可视化管理：账号列表（渠道/状态/限流/最近错误）、
+余额条、**使用中账号选择**、删除，以及面板内双渠道登录（bigmodel / z.ai）。
+
+### Host 侧（`lib/manage-routes.js`，经 `lib/assemble.js` ④ 接线）
+
+- 照抄 `@linxin666/dsh-client-ui-plugin-manager` 的实证宿主契约：
+  `inject: ['webServer']` + `ctx.webServer.register({ kind: 'exact', path, handler })`；
+- loopback 栅栏（socket 地址 + Host 头都校验）。**不用** `node:net.isLoopbackAddress`——
+  Node 22 没有该导出，静态 import 加载即崩；用 `isIP` 本地实现；
+- **安全边界：任何响应不含凭据**（zcode_jwt / device_mid 不出网关），
+  仅暴露脱敏视图（id / 昵称 / 渠道 / user_id 尾 6 位 / 限流标记 / 最近错误）；
+- 端点：`/summary`（全量+逐账号余额）、`/balance?id=`（单账号）、
+  `/set-enabled`、`/remove`、`/reset-limits`、`/reorder`、`/rename`、`/use`、
+  `/login/start`、`/login/poll`（均 POST JSON，`/balance` 除外）；
+- `/use` = 把账号置顶 —— 池子的既有约定是**手动顺序即选号优先级**（`pick()` 取第一个
+  启用且未限流的账号），置顶即「下次请求用它」，复用 `/reorder` 的集合校验；
+- 登录流：两段式设备授权（与 CLI 同一对底层函数），**`flowSecret` 只留在 Host 内存**
+  （每流 10 分钟 TTL、Map 上限 8 条）；授权 URL 只接受 https；ready 时凭据组装
+  与 `beginZcodeLogin` 逐字段一致，凭据不出网关；
+- `AccountPool.patchAccount(id, {nickname})`：白名单只放行 `nickname`
+  （`lib/pool.js`），凭据不可经此路改。
+
+### Client 侧（`client.js`）
+
+- `window.__ModuleLoader__.load({ id, factory })` + `require('react')`（宿主模块表）；
+- 挂官方插件详情页的 `plugins.detail.section` 座位，subject 不指向本插件时返回 null
+  （hooks 全部先于早退调用，顺序约束不破）；
+- 样式只用宿主主题 token（`--dsw-alias-*`），组件局部 `<style>` 注入、卸载即移除；
+- 头部只有一个「刷新」：`/summary` 已带每账号余额，缺失项自动逐个补拉；
+- 账号卡片只有两个按钮：**使用**（置顶，使用中显示「使用中」并禁用 + 卡片描边）
+  与**删除**（二次确认）；
+- 「添加账号」：渠道下拉（智谱国内 bigmodel.cn / Z.AI 国际 z.ai）→ 发起登录 →
+  面板内渲染授权链接（可复制，不用 `window.open` 免弹窗拦截）→ 自动轮询入池。
+
+### 安装契约（这次「面板不渲染」的两个根因，防止重蹈）
+
+- `package.json` 必须有 `exports["./client"]` + `files` 白名单含 `client.js` +
+  `dsh.client` 段（`platform` / `immediately` / `inject: ['@deepseek-ai/dsh-client-ui-renderer']`）
+  —— 缺一样宿主就不把 Client 半段下发给 Web GUI；
+- client 工厂返回值要 `inject: ['slots']`，否则 `ctx.slots` 不存在；
+- 本插件的安装目录（`~/.dsh/plugins/<name>`）是**实体拷贝**而非 `link:`——
+  改完源码必须 robocopy 同步过去，否则宿主看到的永远是旧代码。
+
+### 测试
+
+80 个用例全过（含 webServer 假 ctx 的端到端接线）；
+`scripts/smoke-install.mjs` 对安装位置 26 项检查 PASS；
+面板渲染与操作已在真实 Web UI 验收。
+
 ## 0.1.0 — 首次可用
 
 ### 协议层（移植自 bonus-plan-4-open-zcode）

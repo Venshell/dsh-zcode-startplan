@@ -43,8 +43,9 @@ export const name = 'zcode-start-plan'
  * - `llm`   注册 provider 适配器（本插件的主用途）
  * - `tools` 注册 `zcode_start_plan_status` 状态工具
  * - `timer` 每小时清理过期的「账号×模型」限流标记
+ * - `webServer` 注册账号池管理路由（Web UI 面板的数据通道；可选增强）
  */
-export const inject = ['llm', 'tools', 'timer']
+export const inject = ['llm', 'tools', 'timer', 'webServer']
 
 const PROVIDER = 'zcode-start-plan'
 
@@ -232,11 +233,16 @@ export const Config = makeConfigSchema(validateConfig, {
  * 表现为「插件在列表里、Config 是 schema，但工具和模型全都没有」。
  *
  * 因此：**用到哪个服务就必须在 `inject` 里声明**。本插件用到
- * `llm`（注册适配器）、`tools`（状态工具）、`timer`（定期清理）。
+ * `llm`（注册适配器）、`tools`（状态工具）、`timer`（定期清理）、
+ * `webServer`（账号池管理路由，供插件 Web UI 面板调用）。
  *
  * 另外 `ctx.effect` 在沙箱里可用（它不是服务，是 ctx 动词），
  * 而 `ctx.emit` / `ctx.on` / `ctx.setInterval` **不可用** ——
  * 分别改用 `ctx.llm.emitAdaptersUpdated?.()` 与 `ctx.timer.interval`。
+ *
+ * `webServer`（账号池管理路由）也在 `inject` 里声明了，但注册处做了
+ * 容错（`ctx.webServer?.register` 探测 + try/catch 降级）：单测假 ctx、
+ * 或未来宿主版本缺该服务时，只跳过面板路由，其余功能不受影响。
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx
  * @param {ReturnType<typeof resolveConfig>} rawConfig
