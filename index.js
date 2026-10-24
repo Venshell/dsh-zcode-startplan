@@ -142,7 +142,7 @@ function makeConfigSchema(validate, fields) {
   Object.defineProperty(schema, '~standard', {
     value: {
       version: 1,
-      vendor: 'dsh-zcode-start-plan',
+      vendor: 'dsh-zcode-startplan',
       validate: (value) => {
         try {
           return { value: validate(value ?? {}) }

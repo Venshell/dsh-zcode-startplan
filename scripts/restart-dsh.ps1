@@ -1,4 +1,4 @@
-# 重启 DSH 桌面端（带 CDP 端口），让新装的 dsh-zcode-start-plan 被加载。
+# 重启 DSH 桌面端（带 CDP 端口），让新装的 dsh-zcode-startplan 被加载。
 #
 # 为什么不直接在当前 shell 里 kill：本脚本由**独立的 powershell 进程**执行，
 # 不随 DSH 的子进程树一起死；DSH 主进程退出后它仍在跑，负责拉起新实例。

@@ -1,12 +1,14 @@
-# dsh-zcode-start-plan
+# dsh-zcode-startplan
 
 让 **DSH（DeepSeek Harness）** 用上 **ZCode 赠送的免费 plan**
 （`account:bigmodel-start-plan` → `https://zcode.z.ai/api/v1/zcode-plan/anthropic`）。
 
-协议实现参考并移植自 [bonus-plan-4-open-zcode](https://gitee.com/iJetLi/bonus-plan-4-open-zcode)，
-但**形态不同**：那个项目是 ZCode 的插件（本地 Anthropic 代理 + MCP 工具），
-DSH 侧没有「自定义 provider 指向本地代理」这一层，所以这里直接实现一个
-**`ctx.llm` 适配器**：选号、captcha、切号、重试全在 DSH 进程内完成。
+- 多账号池：多账号轮换，面板内一键「使用」切换，账号级限流标记与余额可视化
+- 双渠道登录：`bigmodel`（智谱开放平台）/ `zai`（Z.AI），插件详情页内直接发起设备授权
+- Web UI 管理面板：挂在官方插件详情页的 `plugins.bundle.config` 座位，零依赖手写组件
+- 零运行时依赖：协议层移植自 [bonus-plan-4-open-zcode](https://gitee.com/iJetLi/bonus-plan-4-open-zcode)，
+  但形态不同——它做的是 ZCode 插件（本地代理），这里直接实现 **`ctx.llm` 适配器**，
+  选号、captcha、切号、重试全在 DSH 进程内完成
 
 ```
 DSH agent-loop
@@ -24,156 +26,42 @@ zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages（直连）
 
 ---
 
-## 一、上游协议硬约束（来自实测，不要"优化"）
-
-| 现象 | 后果 | 本插件的处理 |
-|---|---|---|
-| `system` 不以**官方身份块**开头 | `3012 unusual activity`，**有账号冷却惩罚**（30 分钟；24h 内第 3 次起 24 小时；5 次停用） | `lib/anthropic-body.js` 逐字复刻 cliPrefix + stable 段，调用方 system 追加在最后 |
-| 首轮 user 消息缺 `<system-reminder>` 日期块 | 同上（3012） | 幂等插入到**内容数组**最前面 |
-| captcha 每次请求都产出 | 白耗设备信誉与 0.5–7 秒 | 先不带，被 `3007` 拒才产出，成功则清记忆 |
-| 同一 captcha param 复用 | 必 `3007` | 每轮重试都重新产出 |
-| 把 `3009` 当额度用尽 | 误伤可用账号 | `3009` 退避重试（1500/3000ms）**不换号** |
-| `3012` 重试 | 冷却升级到 24 小时 → 停用 | 直接失败，**绝不重试** |
-| **200 里包裹业务错误** | 错误码被当成「空响应」丢掉，排查全是误导 | `lib/sse.js` 先识别 `{code,msg}` / `{type:error}` / 裸 `{error}`，再按错误表处置 |
-| 200 但零内容直接透传 | 用户看到空回答，账号仍被反复使用 | 先读首帧判定，零内容即标号换号 |
-| 非流式 JSON 用 SSE 特征串判内容 | 正常回答被判空 → **账号被错误标记限流** | 按 content-type 分流，JSON 走结构解析 |
-| `expires_at` 当毫秒用 | 刚点登录就"授权超时" | `toEpochMs()` 按数量级归一（秒/毫秒） |
-| 非法渠道 provider | 上游返回 500 `code:1000` | 渠道白名单在激活期就拒（`bigmodel` / `zai`） |
-| 领取前不补活跃上报 | `preview` 恒为空 → 永远"没得领" | 每次查 preview 前先发 `app_launch` + `app_daily_active` |
-| 普通浏览器 / `about:blank` 出 captcha | 二次 mint 必 F001 | 用**真实 https origin** 的离屏 iframe（宿主 Electron） |
-
----
-
-## 二、DSH 宿主契约（**本插件踩过最深的坑**）
-
-这一节的每一条都会让插件「看起来加载了、其实不工作」。**改动本插件前先读完。**
-
-### 2.1 `ctx` 是沙箱 façade：用到的服务必须 `inject` 声明
-
-宿主的 `ctx` **只挂 `inject` 声明过的服务**。实测（一次性诊断插件）：
-
-```
-Object.keys(ctx)            → ['fiber']      ← 只有 fiber
-ctx.llm                     → object        ← 我 inject 了它，可用
-ctx.tools                   → 抛错 "cannot get property "tools" without inject"
-```
-
-**漏声明的症状**：插件在插件列表里可见、Config 状态是 `schema`（那只是 manifest 元数据，
-不需要执行模块），但**工具与模型全都没有**；宿主只往 stderr 打一条 warning，
-打包态下 stderr 被丢弃 —— 所以什么都看不到。
-
-⇒ 本插件 `inject = ['llm', 'tools', 'timer']`，一个都不多。
-
-### 2.2 宿主对适配器有**三处不带可选调用保护**的直接调用
-
-| 方法 | 何时被调用 | 漏掉的后果 |
-|---|---|---|
-| `providerRetryPolicy(provider)` | `registerAdapter` 时（`prepareRoutes`） | `adapter.providerRetryPolicy is not a function` → **路由不注册** |
-| `prepareCall(provider, model, signal)` | 选模型后 | `registration.adapter.prepareCall is not a function` → **选模型即报错** |
-| `resolveModel(provider, model)` | 校验模型时 | 同上 |
-
-基类 `LlmAdapter` 提供了 `prepareCall` 的默认实现，但本插件**没有 extends 基类**
-（避免与宿主版本耦合），所以三个都要自己补。
-
-### 2.3 chunk 形状必须匹配 `BlockAssembler`
-
-宿主 `dsh-llm/lib/index.js` 的 `BlockAssembler` 逐字如下：
-
-```js
-case "block-start":     partials.set(index, { blockType: chunk.blockType, text: "", toolCallArguments: "" })
-case "text-delta":
-case "reasoning-delta": partial.text += chunk.text
-case "tool-call-delta": toolCallId = chunk.id; toolCallName = chunk.name; toolCallArguments += chunk.argumentsDelta
-case "block-end":       partial.block = chunk.block
-```
-
-即：
-
-- `block-start` 用 **`blockType`（字符串）**，**不是** `block`（对象）
-- `block-end` **必须带完整 `block`**（`assemble()` 直接返回它）
-- `tool-call-delta` 的字段名是 `id` / `name` / **`argumentsDelta`**
-
-形状不对的症状：宿主 `chunk.block.type` 解引用 `undefined` →
-`Cannot read properties of undefined (reading 'type')`。
-**只有思考型模型（先出 reasoning 块）才会立刻暴露** —— 非思考模型晚一步才炸。
-
-⇒ `tests/assembler-contract.test.mjs` **逐字复刻**宿主 assembler 做契约级测试。
-
-### 2.4 模型元数据校验
-
-- 每个 reasoning effort 必须**同时有非空 `id` 与非空 `name`**，且 `id` 不重复
-  → 否则 `INVALID_MODEL_REASONING`（"invalid or duplicate reasoning effort metadata"）
-- `defaultEffort` 必须是已声明过的 effort 之一
-- `listModels` 必须返回**非空**目录，否则宿主要求"catalog membership"的入口
-  （模型选择器）看不到这个 provider
-
-### 2.5 Config 必须是**原生 schemastery** schema
-
-宿主用 `isNativeConfigSchema(config)` 判定：`Symbol.for('schemastery') === true`
-+ string `type` + object `meta`。不满足就是 `status: 'unsupported'` →
-设置页不可编辑、**provider 进不了模型选择器**。
-
-⚠ **但不要 `import '@deepseek-ai/schemastery'`**：`plugin_manager` 用**软链**安装
-（`link:`），插件实际运行在源码目录，那里解析不到 profile 的 `node_modules` ——
-顶层静态 import 会 `ERR_MODULE_NOT_FOUND`，**把宿主 host 进程掀翻**
-（实测：`Error: dsh desktop host exited with 1`）。
-
-⇒ 本插件**零运行时依赖**，自带一个最小 schemastery 兼容对象
-（`lib/` 见 `index.js` 的 `makeConfigSchema`），并附带 Standard Schema 兼容层。
-
-### 2.6 工具输出必须是**无损 JSON**
-
-宿主把 `JSON.parse(text)` 与原值深比较：
-
-- `JSON.stringify(value, null, 2)`（带缩进）→ `value is not lossless JSON`
-- 值里有 `undefined` → 该键被 stringify 静默丢弃 → round-trip 后键消失 → 同样被拒
-
-⇒ 紧凑序列化 + 缺省值一律用 `null`（不是 `undefined`）。
-
-### 2.7 官方标准（`references/host-plugin.md`）要点
-
-- `apply` 内**每个资源**都用 `ctx.effect` / `ctx.on` 注册，并**返回 cleanup**
-- `inject` 写全用到的服务
-- Host-only bundle **不需要**运行时依赖、install 脚本或构建工具
-- 导出 `./locale/*.json` 与 `./icon`；`files` 覆盖所有运行文件
-- 用 `plugin_manager install_bundle` + **绝对目录**安装；**不要**手写 profile 的
-  `package.json` / `cordis.patch.yml`，也**不要**在 profile 目录跑 pnpm
-
----
-
-## 三、安装
+## 安装
 
 ```powershell
 # 1. 放到 plugins 目录
-$dst = "$env:USERPROFILE\.dsh\plugins\dsh-zcode-start-plan"
+$dst = "$env:USERPROFILE\.dsh\plugins\dsh-zcode-startplan"
 robocopy . $dst /E /XD node_modules .git
 
-# 2. 用官方安装器登记（它负责 pnpm install 与 bundle 选择）
-#    —— 在 DSH 会话里调用 plugin_manager install_bundle，target 传 $dst 的绝对路径
+# 2. 用官方安装器登记 —— 在 DSH 会话里调用 plugin_manager install_bundle，
+#    target 传 $dst 的绝对路径
 ```
 
 装完后 profile 的 `package.json` 会自动出现：
 
 ```jsonc
 {
-  "dependencies": { "dsh-zcode-start-plan": "link:C:/Users/<you>/.dsh/plugins/dsh-zcode-start-plan" },
-  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-zcode-start-plan"] } }
+  "dependencies": { "dsh-zcode-startplan": "link:C:/Users/<you>/.dsh/plugins/dsh-zcode-startplan" },
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-zcode-startplan"] } }
 }
 ```
 
 > ⚠ `link:` 安装下**重启宿主**才会加载新的 JS 模块代际（热重载只重建 entry，
-> 不重新 import 已缓存的模块）。
+> 不重新 import 已缓存的模块）。另外本插件安装目录若为实体拷贝，改完源码记得
+> robocopy 同步过去，否则宿主看到的永远是旧代码。
 
----
+## 登录账号
 
-## 四、登录账号
+**方式一（推荐）：Web UI 面板**。重启宿主后打开 DSH 设置 → 插件 →
+ZCode Start Plan 详情页，顶部「添加账号」：渠道下拉选 `bigmodel` 或 `zai` →
+发起登录 → 浏览器完成授权 → 自动入池。
 
-赠送 plan 挂在某个 ZCode 账号上，用官方**设备授权流**登录（纯 HTTP，不需要 ZCode IDE）：
+**方式二：CLI**（无需 DSH 在跑）：
 
 ```powershell
 cd <插件目录>
-node bin/cli.mjs login                    # 国内站（智谱 bigmodel.cn），默认
-node bin/cli.mjs login --channel intl     # 国际站（Z.AI z.ai）
+node bin/cli.mjs login                    # 默认渠道 bigmodel（智谱 bigmodel.cn）
+node bin/cli.mjs login --channel zai      # zai（Z.AI · z.ai）
 node bin/cli.mjs list                     # 账号列表（脱敏，含来源渠道）
 node bin/cli.mjs status                   # 账号 + 余额 + 上游模型目录 + captcha 配置
 ```
@@ -184,15 +72,25 @@ node bin/cli.mjs status                   # 账号 + 余额 + 上游模型目录
 已有 JWT 时可导入：
 
 ```powershell
-node bin/cli.mjs import .\zcode-jwt.txt --name 主号
+node bin/cli.mjs import .\zcode-jwt.txt --name <备注>
 ```
 
 > 账号库在 `%USERPROFILE%\.dsh\zcode-start-plan\accounts.db`（SQLite，600）。
 > 目录不可写时降级为**内存库**并在日志里明确告警。
 
----
+## Web UI 管理面板
 
-## 五、在 DSH 里使用
+插件详情页的「账号池管理」块（`plugins.bundle.config` 座位，按包名 key 派发）：
+
+- **账号列表**：状态点、昵称（点击原位改名）、渠道（`bigmodel` / `zai`）、限流 chips、余额条
+- **使用**：把该账号置顶 —— 池子的约定是**手动顺序即选号优先级**，置顶即
+  「下一次请求用它」；使用中的账号显示「使用中」并高亮
+- **删除**：二次确认后删除
+- **刷新**：一个按钮搞定（列表+余额一次拉全，缺失项自动补拉）
+- 安全：面板与宿主之间走同源 fetch + loopback 路由，凭据永不出网关；
+  登录授权的 `flowSecret` 只留在宿主内存
+
+## 在 DSH 里使用
 
 1. 模型选择器里选 **「ZCode Start Plan」→ GLM-5.3 / GLM-5.3-Flash**
 2. 会话里说「看一下 zcode start plan 的状态」→ 触发 `zcode_start_plan_status`
@@ -221,12 +119,7 @@ node bin/cli.mjs captcha     # 打印「调试端口可达 / 不可达」与产�
 node bin/cli.mjs probe       # 真发一条最小请求，验证「选号 → captcha → 首帧」全链路
 ```
 
-> 实测参考值：新建帧约 1.8 秒、热复用约 0.4–0.5 秒。本实现默认**不因空闲换帧**
-> （参考实现曾因此白付 2.7 秒，即用户投诉的"签到很慢"）。
-
----
-
-## 六、额度与切号
+## 额度与切号
 
 - 免费额度按**自然日**（UTC+8）结算；用尽的账号标记到当日 24:00 自动恢复
 - 触发切号：`1005` / `1113`、HTTP 200 但**零内容**
@@ -241,21 +134,19 @@ node bin/cli.mjs claim        # 补活跃上报 → 查可领 → 逐个领取�
 
 `1003`（已领取过）按**幂等成功**处理。
 
----
-
-## 七、配置（`cordis.patch.yml`）
+## 配置（`cordis.patch.yml`）
 
 ```yaml
 - insert:
     - id: zcode-start-plan
-      name: dsh-zcode-start-plan
+      name: dsh-zcode-startplan
       config:
         provider: zcode-start-plan      # DSH 路由名（与其它 llm 适配器不能重名）
         displayName: ZCode Start Plan（赠送免费 plan）
         models: [GLM-5.3, GLM-5.3-Flash]
         dataDir: ''                     # 空 = ~/.dsh/zcode-start-plan
         modelCacheMs: 600000
-        channel: cn                    # cn = 智谱国内站；intl = Z.AI 国际站
+        channel: bigmodel               # bigmodel（智谱）或 zai（Z.AI）
         captcha:
           mode: cdp                     # cdp = 宿主 Electron 产出；manual = 人工粘贴
           debugPort: 9229
@@ -272,7 +163,7 @@ node bin/cli.mjs claim        # 补活跃上报 → 查可领 → 逐个领取�
 
 ```yaml
 - id: zcode-start-plan
-  name: dsh-zcode-start-plan
+  name: dsh-zcode-startplan
   config:
     provider: zcode-start-plan-pi
     endpoint: { enabled: true, port: 17899 }
@@ -293,9 +184,119 @@ node bin/cli.mjs claim        # 补活跃上报 → 查可领 → 逐个领取�
 端点 token 持久化在 `<dataDir>\endpoint-token.txt`，**端口与 token 都不能每次变**
 （profile 里配好的 `baseURL` / `apiKeyEnv` 会每次重启失效）。
 
----
+## 上游协议硬约束（来自实测，不要"优化"）
 
-## 八、已知边界
+| 现象 | 后果 | 本插件的处理 |
+|---|---|---|
+| `system` 不以**官方身份块**开头 | `3012 unusual activity`，**有账号冷却惩罚**（30 分钟；24h 内第 3 次起 24 小时；5 次停用） | `lib/anthropic-body.js` 逐字复刻 cliPrefix + stable 段，调用方 system 追加在最后 |
+| 首轮 user 消息缺 `<system-reminder>` 日期块 | 同上（3012） | 幂等插入到**内容数组**最前面 |
+| captcha 每次请求都产出 | 白耗设备信誉与 0.5–7 秒 | 先不带，被 `3007` 拒才产出，成功则清记忆 |
+| 同一 captcha param 复用 | 必 `3007` | 每轮重试都重新产出 |
+| 把 `3009` 当额度用尽 | 误伤可用账号 | `3009` 退避重试（1500/3000ms）**不换号** |
+| `3012` 重试 | 冷却升级到 24 小时 → 停用 | 直接失败，**绝不重试** |
+| **200 里包裹业务错误** | 错误码被当成「空响应」丢掉，排查全是误导 | `lib/sse.js` 先识别 `{code,msg}` / `{type:error}` / 裸 `{error}`，再按错误表处置 |
+| 200 但零内容直接透传 | 用户看到空回答，账号仍被反复使用 | 先读首帧判定，零内容即标号换号 |
+| 非流式 JSON 用 SSE 特征串判内容 | 正常回答被判空 → **账号被错误标记限流** | 按 content-type 分流，JSON 走结构解析 |
+| `expires_at` 当毫秒用 | 刚点登录就"授权超时" | `toEpochMs()` 按数量级归一（秒/毫秒） |
+| 非法渠道 provider | 上游返回 500 `code:1000` | 渠道白名单在激活期就拒（`bigmodel` / `zai`） |
+| 领取前不补活跃上报 | `preview` 恒为空 → 永远"没得领" | 每次查 preview 前先发 `app_launch` + `app_daily_active` |
+| 普通浏览器 / `about:blank` 出 captcha | 二次 mint 必 F001 | 用**真实 https origin** 的离屏 iframe（宿主 Electron） |
+
+## DSH 宿主契约（**本插件踩过最深的坑**）
+
+这一节的每一条都会让插件「看起来加载了、其实不工作」。**改动本插件前先读完。**
+
+### `ctx` 是沙箱 façade：用到的服务必须 `inject` 声明
+
+宿主的 `ctx` **只挂 `inject` 声明过的服务**。实测（一次性诊断插件）：
+
+```
+Object.keys(ctx)            → ['fiber']      ← 只有 fiber
+ctx.llm                     → object        ← 我 inject 了它，可用
+ctx.tools                   → 抛错 "cannot get property "tools" without inject"
+```
+
+**漏声明的症状**：插件在插件列表里可见、Config 状态是 `schema`（那只是 manifest 元数据，
+不需要执行模块），但**工具与模型全都没有**；宿主只往 stderr 打一条 warning，
+打包态下 stderr 被丢弃 —— 所以什么都看不到。
+
+⇒ 本插件 `inject = ['llm', 'tools', 'timer', 'webServer']`，一个都不多。
+
+### 宿主对适配器有**三处不带可选调用保护**的直接调用
+
+| 方法 | 何时被调用 | 漏掉的后果 |
+|---|---|---|
+| `providerRetryPolicy(provider)` | `registerAdapter` 时（`prepareRoutes`） | `adapter.providerRetryPolicy is not a function` → **路由不注册** |
+| `prepareCall(provider, model, signal)` | 选模型后 | `registration.adapter.prepareCall is not a function` → **选模型即报错** |
+| `resolveModel(provider, model)` | 校验模型时 | 同上 |
+
+基类 `LlmAdapter` 提供了 `prepareCall` 的默认实现，但本插件**没有 extends 基类**
+（避免与宿主版本耦合），所以三个都要自己补。
+
+### chunk 形状必须匹配 `BlockAssembler`
+
+宿主 `dsh-llm/lib/index.js` 的 `BlockAssembler` 逐字如下：
+
+```js
+case "block-start":     partials.set(index, { blockType: chunk.blockType, text: "", toolCallArguments: "" })
+case "text-delta":
+case "reasoning-delta": partial.text += chunk.text
+case "tool-call-delta": toolCallId = chunk.id; toolCallName = chunk.name; toolCallArguments += chunk.argumentsDelta
+case "block-end":       partial.block = chunk.block
+```
+
+即：
+
+- `block-start` 用 **`blockType`（字符串）**，**不是** `block`（对象）
+- `block-end` **必须带完整 `block`**（`assemble()` 直接返回它）
+- `tool-call-delta` 的字段名是 `id` / `name` / **`argumentsDelta`**
+
+形状不对的症状：宿主 `chunk.block.type` 解引用 `undefined` →
+`Cannot read properties of undefined (reading 'type')`。
+**只有思考型模型（先出 reasoning 块）才会立刻暴露** —— 非思考模型晚一步才炸。
+
+⇒ `tests/assembler-contract.test.mjs` **逐字复刻**宿主 assembler 做契约级测试。
+
+### 模型元数据校验
+
+- 每个 reasoning effort 必须**同时有非空 `id` 与非空 `name`**，且 `id` 不重复
+  → 否则 `INVALID_MODEL_REASONING`（"invalid or duplicate reasoning effort metadata"）
+- `defaultEffort` 必须是已声明过的 effort 之一
+- `listModels` 必须返回**非空**目录，否则宿主要求"catalog membership"的入口
+  （模型选择器）看不到这个 provider
+
+### Config 必须是**原生 schemastery** schema
+
+宿主用 `isNativeConfigSchema(config)` 判定：`Symbol.for('schemastery') === true`
++ string `type` + object `meta`。不满足就是 `status: 'unsupported'` →
+设置页不可编辑、**provider 进不了模型选择器**。
+
+⚠ **但不要 `import '@deepseek-ai/schemastery'`**：`plugin_manager` 用**软链**安装
+（`link:`），插件实际运行在源码目录，那里解析不到 profile 的 `node_modules` ——
+顶层静态 import 会 `ERR_MODULE_NOT_FOUND`，**把宿主 host 进程掀翻**
+（实测：`Error: dsh desktop host exited with 1`）。
+
+⇒ 本插件**零运行时依赖**，自带一个最小 schemastery 兼容对象
+（`index.js` 的 `makeConfigSchema`），并附带 Standard Schema 兼容层。
+
+### 工具输出必须是**无损 JSON**
+
+宿主把 `JSON.parse(text)` 与原值深比较：
+
+- `JSON.stringify(value, null, 2)`（带缩进）→ `value is not lossless JSON`
+- 值里有 `undefined` → 该键被 stringify 静默丢弃 → round-trip 后键消失 → 同样被拒
+
+⇒ 紧凑序列化 + 缺省值一律用 `null`（不是 `undefined`）。
+
+### Web UI（Client 半段）的两个硬契约
+
+- `package.json` 必须有 `exports["./client"]` + `files` 白名单含 `client.js` +
+  `dsh.client` 段（`platform` / `immediately` / `inject`），缺一样宿主就不把
+  Client 半段下发给 Web GUI；client 工厂返回值要 `inject: ['slots']`
+- 面板挂 `plugins.bundle.config` 座位：宿主**按包名 key 派发**（`key` 必须与
+  安装的包名一字不差），列表页则以 `view === 'summary'` 请求一行简介
+
+## 已知边界
 
 - **闭源 ZCode 与本插件同时用同一账号**会双倍消耗验证配额 —— 建议一处用
 - `--headless` 宿主产不出 captcha（真 GUI 进程天然满足）
@@ -306,15 +307,13 @@ node bin/cli.mjs claim        # 补活跃上报 → 查可领 → 逐个领取�
 - 参考实现带「宿主守卫」（识别闭源 ZCode 并拒绝产出）；DSH 场景没有这个二义性
   （宿主永远是 DSH），故未移植
 
----
-
-## 九、开发
+## 开发
 
 ```powershell
-node scripts/run-tests.mjs      # 76 个用例，单进程跑（沙箱里 spawn 会被拒）
+node scripts/run-tests.mjs      # 80 个用例，单进程跑（沙箱里 spawn 会被拒）
 node scripts/smoke-install.mjs  # 对**已安装**的插件跑真实接线（26 项）
-node scripts/verify_compat.mjs # 兼容性门禁（peerDependencies 不会被判不兼容）
-node bin/cli.mjs help          # CLI 一览
+node scripts/verify_compat.mjs  # 兼容性门禁（peerDependencies 不会被判不兼容）
+node bin/cli.mjs help           # CLI 一览
 ```
 
 测试覆盖：上游请求头与错误分类、身份块/日期块/工具断点、SSE 解码（含跨 chunk 与
@@ -327,7 +326,9 @@ EOF flush）、**宿主 `BlockAssembler` 契约级复刻**、Anthropic→DSH 流
 | 文件 | 作用 |
 |---|---|
 | `index.js` | Cordis 入口：Config 契约（零依赖 schemastery 兼容）、`inject` 声明、`apply` 与 cleanup |
-| `lib/assemble.js` | 资源装配与释放、状态工具 |
+| `client.js` | Client 半段：插件详情页的账号池管理面板（`plugins.bundle.config`） |
+| `lib/assemble.js` | 资源装配与释放、状态工具、管理路由注册 |
+| `lib/manage-routes.js` | `/api/zcode-start-plan/*` 管理路由（loopback 栅栏、凭据不出网关） |
 | `lib/adapter.js` | `llm` 适配器（`providerInfo` / `providerRetryPolicy` / `listModels` / `resolveModel` / `prepareCall` / `stream`） |
 | `lib/plan-client.js` | 一次调用的编排：选号 / captcha / 重试 / 切号 |
 | `lib/anthropic-body.js` | 官方身份块、日期块、tools 断点、DSH↔Anthropic 内容转换 |
@@ -341,4 +342,5 @@ EOF flush）、**宿主 `BlockAssembler` 契约级复刻**、Anthropic→DSH 流
 
 ## 许可
 
-MIT（沿用参考实现的选择）。上游服务条款与账号策略以服务提供方为准。
+GPL-3.0-or-later，见 [LICENSE](LICENSE)。上游服务条款与账号策略以服务提供方为准。
+协议实现参考并移植自 [bonus-plan-4-open-zcode](https://gitee.com/iJetLi/bonus-plan-4-open-zcode)。

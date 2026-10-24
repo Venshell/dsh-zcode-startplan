@@ -1,4 +1,4 @@
-# dsh-zcode-start-plan bundle patch
+# dsh-zcode-startplan bundle patch
 #
 # 安装后这里就是「开关面板」：改完重启 Harness 生效（fiber 一次性 apply）。
 #
@@ -11,7 +11,7 @@
 #   statusTool              是否注册 zcode_start_plan_status 工具
 - insert:
     - id: zcode-start-plan
-      name: dsh-zcode-start-plan
+      name: dsh-zcode-startplan
       config:
         provider: zcode-start-plan
         displayName: ZCode Start Plan（赠送免费 plan）

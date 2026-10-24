@@ -1,7 +1,7 @@
 # 诊断报告：长上下文下工具调用参数丢失
 
 - **日期**：2026-10-24
-- **环境**：DSH profile `desktop`，插件 `dsh-zcode-start-plan@0.1.0`（源码即本仓库）
+- **环境**：DSH profile `desktop`，插件 `dsh-zcode-startplan@0.1.0`（源码即本仓库）
 - **模型通路**：`zcode-start-plan/GLM-5.3-Flash`（GLM-5.3 / reasoningEffort=max）
 - **状态**：P0 两处代码问题已修复并通过定向回归测试；长会话实测待验证
 - **排查方法**：bug-diagnose 流程（现象 → 复现 → 证据 → 可证伪假设 → 根因 → 修复方案）

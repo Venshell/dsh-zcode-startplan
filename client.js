@@ -6,7 +6,7 @@
  *
  * `plugins.bundle.config` 是官方插件页按**包名 key 派发**的配置区块座位，
  * 渲染在详情页「包含的组件」列表上方；宿主只在本包的详情页派发
- * `key === 'dsh-zcode-start-plan'` 的条目，列表页则以 `view === 'summary'`
+ * `key === 'dsh-zcode-startplan'` 的条目，列表页则以 `view === 'summary'`
  * 请求一行简介。组件无需自己做 subject 过滤。
  *
  * ## 数据通道
@@ -24,7 +24,7 @@
  *   宿主负责其生命周期。
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-zcode-start-plan',
+  id: 'dsh-zcode-startplan',
   factory(require) {
     const React = require('react')
     const h = React.createElement
@@ -32,7 +32,7 @@ window.__ModuleLoader__.load({
 
     const SLOT = 'plugins.bundle.config'
     /** 宿主按包名派发此座位（workbuddy 实证：key 必须与安装的包名一字不差）。 */
-    const BUNDLE_KEY = 'dsh-zcode-start-plan'
+    const BUNDLE_KEY = 'dsh-zcode-startplan'
     const API = '/api/zcode-start-plan'
     const CONFIRM_RESET_MS = 3000
 
@@ -650,7 +650,7 @@ window.__ModuleLoader__.load({
       inject: ['slots'],
       apply(ctx) {
         ctx.slots.inject(SLOT, () =>
-          /** key = 包名：宿主只在 dsh-zcode-start-plan 的详情页派发本条目。 */
+          /** key = 包名：宿主只在 dsh-zcode-startplan 的详情页派发本条目。 */
           ctx.slots.register({ name: SLOT, key: BUNDLE_KEY }, Panel),
         )
       },

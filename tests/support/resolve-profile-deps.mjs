@@ -3,7 +3,7 @@
  *
  * ## 为什么需要
  *
- * 插件在**安装位置**运行：`~/.dsh/profiles/desktop/node_modules/dsh-zcode-start-plan`，
+ * 插件在**安装位置**运行：`~/.dsh/profiles/desktop/node_modules/dsh-zcode-startplan`，
  * 于是 Node 从那里向上查找 `node_modules` 能命中 profile 的依赖。
  * 但在**源码目录**跑测试时，`import '@deepseek-ai/schemastery'` 无处可寻 ——
  * 这不是插件的 bug，而是测试不在真实运行位置。

@@ -7,7 +7,7 @@
  *
  * ```powershell
  * node scripts/smoke-install.mjs
- * node scripts/smoke-install.mjs "C:\path\to\dsh-zcode-start-plan"   # 指定安装位置
+ * node scripts/smoke-install.mjs "C:\path\to\dsh-zcode-startplan"   # 指定安装位置
  * ```
  *
  * 退出码：0 = 全部通过；1 = 有失败项。
@@ -19,7 +19,7 @@ import { pathToFileURL } from 'node:url'
 
 const entryRoot =
   process.argv[2] ??
-  join(process.env.USERPROFILE ?? process.env.HOME ?? '.', '.dsh', 'profiles', 'desktop', 'node_modules', 'dsh-zcode-start-plan')
+  join(process.env.USERPROFILE ?? process.env.HOME ?? '.', '.dsh', 'profiles', 'desktop', 'node_modules', 'dsh-zcode-startplan')
 
 const checks = []
 const ok = (name, pass, detail = '') => checks.push({ name, pass: Boolean(pass), detail })
