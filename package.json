@@ -1,0 +1,66 @@
+{
+  "name": "dsh-zcode-start-plan",
+  "version": "0.1.0",
+  "description": "DSH 接入 ZCode 赠送免费 plan（account:bigmodel-start-plan）：多账号池 + 按需阿里云 captcha + 直连 zcode-plan/anthropic 的 llm 适配器。移植自 gitee.com/iJetLi/bonus-plan-4-open-zcode。",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "zcode",
+    "zhipu",
+    "glm",
+    "model-provider",
+    "captcha",
+    "anthropic-messages"
+  ],
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "bin",
+    "scripts",
+    "tests",
+    "locale/*.json",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "zcode-start-plan": "./bin/cli.mjs"
+  },
+  "scripts": {
+    "check": "node --check index.js && node --check bin/cli.mjs",
+    "test": "node scripts/run-tests.mjs",
+    "smoke": "node scripts/smoke-install.mjs",
+    "verify:compat": "node scripts/verify_compat.mjs",
+    "login": "node bin/cli.mjs login",
+    "status": "node bin/cli.mjs status",
+    "probe": "node bin/cli.mjs probe"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "^0.2.0-rc.2"
+  },
+  "engines": {
+    "node": "^22.19 || >=24"
+  },
+  "dsh": {
+    "id": "dsh-zcode-start-plan",
+    "name": "ZCode Start Plan",
+    "version": "0.1.0",
+    "permissions": "模型供应商接入, 账号池管理",
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

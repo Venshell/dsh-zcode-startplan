@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="ZCode Start Plan">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3B82F6"/>
+      <stop offset="1" stop-color="#8B5CF6"/>
+    </linearGradient>
+  </defs>
+  <!-- 底座：代表"通道" -->
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#g)"/>
+  <!-- Z 字形折线：ZCode 的首字母 -->
+  <path d="M19 19 H45 L19 45 H45" fill="none" stroke="#FFFFFF" stroke-width="6"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- 右上角的"起点"圆点：Start -->
+  <circle cx="47" cy="17" r="5" fill="#FFFFFF" opacity="0.9"/>
+  <!-- 左下角的勾：免费额度已领取的状态暗示 -->
+  <path d="M15 50 L19 54 L26 47" fill="none" stroke="#FFFFFF" stroke-width="3.5"
+        stroke-linecap="round" stroke-linejoin="round" opacity="0.75"/>
+</svg>

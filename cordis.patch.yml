@@ -1,0 +1,30 @@
+# dsh-zcode-start-plan bundle patch
+#
+# 安装后这里就是「开关面板」：改完重启 Harness 生效（fiber 一次性 apply）。
+#
+#   provider / displayName  DSH 里的路由名与展示名（与 llm-pi-ai 的路由不能重名）
+#   models                  暴露给 DSH 的模型 id（与上游目录求交集）
+#   captcha.debugPort       宿主 Electron 的 CDP 端口（DSH 桌面端需以
+#                           --remote-debugging-port=9229 启动；captcha 用它产出）
+#   captcha.mode            cdp = 自动产出；manual = 只认人工粘贴（见 CLI）
+#   endpoint.enabled        true 才启动本地 Anthropic 端点（仅 llm-pi-ai 回落路线需要）
+#   statusTool              是否注册 zcode_start_plan_status 工具
+- insert:
+    - id: zcode-start-plan
+      name: dsh-zcode-start-plan
+      config:
+        provider: zcode-start-plan
+        displayName: ZCode Start Plan（赠送免费 plan）
+        models:
+          - GLM-5.3-Flash
+          - GLM-5.3
+        dataDir: ''
+        modelCacheMs: 600000
+        captcha:
+          mode: cdp
+          debugPort: 9229
+          origin: https://zcode.z.ai/
+        endpoint:
+          enabled: false
+          port: 17899
+        statusTool: true
