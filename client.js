@@ -578,31 +578,17 @@ window.__ModuleLoader__.load({
           const summary = await api('/summary')
           setData(summary)
           const seeded = {}
-          const missing = []
           for (const item of Array.isArray(summary?.accounts) ? summary.accounts : []) {
             if (item.balance !== null && item.balance !== undefined) {
               seeded[item.id] = { ok: true, ...item.balance }
-            } else if (item.enabled === true) {
-              missing.push(item.id)
+            } else {
+              /**
+               * summary 对余额并行拉取且失败显式下发 `balance: null`（上游已明确
+               * 不可用）；不再逐个补打 /balance —— 那是对同一端点的重复请求。
+               * 单账号刷新仍走面板「刷新」→ /summary。
+               */
+              seeded[item.id] = { ok: false, error: '余额不可用' }
             }
-          }
-          if (missing.length > 0) {
-            const extra = await Promise.all(
-              missing.map(async (id) => {
-                try {
-                  const result = await api(`/balance?id=${encodeURIComponent(id)}`)
-                  return [
-                    id,
-                    result.balance === null || result.balance === undefined
-                      ? { ok: false, error: typeof result.error === 'string' ? result.error : '余额不可用' }
-                      : { ok: true, ...result.balance },
-                  ]
-                } catch (caught) {
-                  return [id, { ok: false, error: caught instanceof Error ? caught.message : String(caught) }]
-                }
-              }),
-            )
-            for (const [id, value] of extra) seeded[id] = value
           }
           setBalances(seeded)
           setError(undefined)
