@@ -4,6 +4,9 @@
 （`account:bigmodel-start-plan` → `https://zcode.z.ai/api/v1/zcode-plan/anthropic`）。
 
 - 多账号池：多账号轮换，面板内一键「使用」切换，账号级限流标记与余额可视化
+- **每账号一个模型栏位**（workbuddy 模式）：模型选择器里一栏一个账号
+  （`ZCode Start Plan · 主号`），栏内模型固定消耗该账号额度（不自动换号），
+  多会话各吃各的；「统一选号」栏位可在面板一键隐藏/恢复
 - 双渠道登录：`bigmodel`（智谱开放平台）/ `zai`（Z.AI），插件详情页内直接发起设备授权
 - Web UI 管理面板：挂在官方插件详情页的 `plugins.bundle.config` 座位，零依赖手写组件
 - 零运行时依赖：协议层移植自 [bonus-plan-4-open-zcode](https://gitee.com/iJetLi/bonus-plan-4-open-zcode)，
@@ -123,7 +126,11 @@ node bin/cli.mjs import .\zcode-jwt.txt --name <备注>
 
 ## 在 DSH 里使用
 
-1. 模型选择器里选 **「ZCode Start Plan」→ GLM-5.3 / GLM-5.3-Flash**
+1. 模型选择器里每个启用账号都是独立一栏：**「ZCode Start Plan · 主号」→
+   GLM-5.3 / GLM-5.3-Flash** —— 栏内模型固定消耗该账号的额度（额度尽明确报错，
+   不自动换号），多会话可各选各的账号栏
+   - 「ZCode Start Plan」统一栏位按置顶顺序自动选号；不需要时可在插件面板
+     「隐藏统一选号栏位」，随时可恢复
 2. 会话里说「看一下 zcode start plan 的状态」→ 触发 `zcode_start_plan_status`
    （返回路由、模型、账号数、每账号的限流标记、captcha 可达性、诊断字段
    `adapterRegistered` / `error`）
@@ -175,6 +182,7 @@ node bin/cli.mjs claim        # 补活跃上报 → 查可领 → 逐个领取�
         provider: zcode-start-plan      # DSH 路由名（与其它 llm 适配器不能重名）
         displayName: ZCode Start Plan（赠送免费 plan）
         models: [GLM-5.3, GLM-5.3-Flash]
+        accountProviders: true          # false = 不为每个账号注册独立 provider 栏位
         dataDir: ''                     # 空 = ~/.dsh/zcode-start-plan
         modelCacheMs: 600000
         channel: bigmodel               # bigmodel（智谱）或 zai（Z.AI）
@@ -215,6 +223,14 @@ node bin/cli.mjs claim        # 补活跃上报 → 查可领 → 逐个领取�
 端点 token 持久化在 `<dataDir>\endpoint-token.txt`，**端口与 token 都不能每次变**
 （profile 里配好的 `baseURL` / `apiKeyEnv` 会每次重启失效）。
 
+### 接入 ZCode CLI（无需 DSH 在跑）
+
+[zcode-cli-adapter/](zcode-cli-adapter/) 把同一套账号池/切号/captcha 能力以独立
+Anthropic 端点（`server.mjs`）的形态提供给**开源 ZCode CLI**：导入/登录账号 →
+起端点 → `register-provider.mjs` 写入 CLI 自定义供应商（`custom:dsh-zcode-startplan`）→
+会话里 `/model custom:dsh-zcode-startplan/GLM-5.3-Flash`。详见
+[zcode-cli-adapter/README.md](zcode-cli-adapter/README.md)。
+
 ## 上游协议硬约束（来自实测，不要"优化"）
 
 | 现象 | 后果 | 本插件的处理 |
@@ -227,6 +243,8 @@ node bin/cli.mjs claim        # 补活跃上报 → 查可领 → 逐个领取�
 | `3012` 重试 | 冷却升级到 24 小时 → 停用 | 直接失败，**绝不重试** |
 | **200 里包裹业务错误** | 错误码被当成「空响应」丢掉，排查全是误导 | `lib/sse.js` 先识别 `{code,msg}` / `{type:error}` / 裸 `{error}`，再按错误表处置 |
 | 200 但零内容直接透传 | 用户看到空回答，账号仍被反复使用 | 先读首帧判定，零内容即标号换号 |
+| DSH 的 image 块是**持久引用**（`{type:'image', attachment:ref}`），不是 base64 | 只认内联 base64 会把图片**静默丢弃**（用户发图但上游没收到） | 组 body 前经附件服务 `readImageRequest` 解析成字节再编码（`ctx.get('attachments')` 探测，刻意不进 inject —— inject 是硬依赖，服务缺席会挂起整个插件） |
+| 上游模型目录 `capabilities.vision` 决定图片能力 | 宿主对声明不含 `image` 的模型直接拒带图消息 | `GLM-5.3-Flash` 实测 `vision:true` 可传图；`GLM-5.3` 为空，带图请换 Flash |
 | 非流式 JSON 用 SSE 特征串判内容 | 正常回答被判空 → **账号被错误标记限流** | 按 content-type 分流，JSON 走结构解析 |
 | `expires_at` 当毫秒用 | 刚点登录就"授权超时" | `toEpochMs()` 按数量级归一（秒/毫秒） |
 | 非法渠道 provider | 上游返回 500 `code:1000` | 渠道白名单在激活期就拒（`bigmodel` / `zai`） |
@@ -362,6 +380,7 @@ EOF flush）、**宿主 `BlockAssembler` 契约级复刻**、Anthropic→DSH 流
 |---|---|
 | `index.js` | Cordis 入口：Config 契约（零依赖 schemastery 兼容）、`inject` 声明、`apply` 与 cleanup |
 | `client.js` | Client 半段：插件详情页的账号池管理面板（`plugins.bundle.config`） |
+| `lib/pinned-model.js` | 「模型 × 账号」钉定条目的 id 编解码（`<base>@acct:<账号id>`） |
 | `lib/assemble.js` | 资源装配与释放、状态工具、管理路由注册 |
 | `lib/manage-routes.js` | `/api/zcode-start-plan/*` 管理路由（loopback 栅栏、凭据不出网关） |
 | `lib/adapter.js` | `llm` 适配器（`providerInfo` / `providerRetryPolicy` / `listModels` / `resolveModel` / `prepareCall` / `stream`） |

@@ -4,6 +4,7 @@
 #
 #   provider / displayName  DSH 里的路由名与展示名（与 llm-pi-ai 的路由不能重名）
 #   models                  暴露给 DSH 的模型 id（与上游目录求交集）
+#   accountProviders        true = 每个启用账号一个独立 provider 栏位（可在面板关统一栏）
 #   captcha.debugPort       宿主 Electron 的 CDP 端口（DSH 桌面端需以
 #                           --remote-debugging-port=9229 启动；captcha 用它产出）
 #   captcha.mode            cdp = 自动产出；manual = 只认人工粘贴（见 CLI）
@@ -18,6 +19,7 @@
         models:
           - GLM-5.3-Flash
           - GLM-5.3
+        accountProviders: true
         dataDir: ''
         modelCacheMs: 600000
         captcha:

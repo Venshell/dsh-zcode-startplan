@@ -51,6 +51,8 @@ window.__ModuleLoader__.load({
       .zsp-ok{color:var(--dsw-alias-state-success-primary);font-size:12px;word-break:break-word;margin:0}
       .zsp-card{display:flex;flex-direction:column;gap:6px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);border-radius:8px;padding:10px 12px;min-width:0}
       .zsp-card[data-next=true]{border-color:var(--dsw-alias-state-business-primary)}
+      .zsp-card[data-hidden=true]{opacity:.62}
+      .zsp-group{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:10px 12px;min-width:0}
       .zsp-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
       .zsp-dot{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-label-tertiary);flex:none}
       .zsp-dot[data-on=true]{background:var(--dsw-alias-state-success-primary)}
@@ -85,6 +87,16 @@ window.__ModuleLoader__.load({
       .zsp-option[aria-selected=true] .zsp-option-check{visibility:visible}
       .zsp-option-text{display:flex;flex-direction:column;min-width:0}
       .zsp-badge{flex:none;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:5px;font-size:10px;font-weight:700;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+      .zsp-toggle-row{margin-left:auto;display:inline-flex;align-items:center;gap:6px;flex:none;color:var(--dsw-alias-label-tertiary);font-size:11px}
+      .zsp-toggle{position:relative;display:inline-block;flex:none;width:30px;height:17px}
+      .zsp-toggle input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}
+      .zsp-toggle-track{position:absolute;inset:0;border-radius:999px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);transition:background .15s ease,border-color .15s ease;pointer-events:none}
+      .zsp-toggle-track::after{content:'';position:absolute;top:1px;left:1px;width:13px;height:13px;border-radius:50%;background:var(--dsw-alias-label-primary);transition:transform .15s ease}
+      .zsp-toggle input:checked + .zsp-toggle-track{background:var(--dsw-alias-state-business-primary);border-color:var(--dsw-alias-state-business-primary)}
+      .zsp-toggle input:checked + .zsp-toggle-track::after{transform:translateX(13px);background:#fff}
+      .zsp-toggle input:focus-visible + .zsp-toggle-track{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
+      .zsp-toggle input:disabled{cursor:default}
+      .zsp-toggle input:disabled + .zsp-toggle-track{opacity:.5}
       @media (max-width: 520px){
         .zsp-head{gap:6px}
         .zsp-title{font-size:12.5px}
@@ -106,6 +118,26 @@ window.__ModuleLoader__.load({
         throw new Error(typeof data?.error === 'string' ? data.error : `HTTP ${response.status}`)
       }
       return data
+    }
+
+    /**
+     * 开关（iOS 风格）：「模型列表里显示这一栏」的每栏右侧开关。
+     * checked = 显示；原生 checkbox 保证可访问性（键盘/读屏）。
+     */
+    function Toggle(props) {
+      const { checked, disabled, title, onChange } = props
+      return h(
+        'label',
+        { className: 'zsp-toggle', title },
+        h('input', {
+          type: 'checkbox',
+          checked: checked === true,
+          disabled,
+          'aria-label': title,
+          onChange: (event) => onChange(event.target.checked),
+        }),
+        h('span', { className: 'zsp-toggle-track', 'aria-hidden': 'true' }),
+      )
     }
 
     /** 渠道显示名：直接用官方 provider id（zai / bigmodel），不做本地化称呼。 */
@@ -179,7 +211,7 @@ window.__ModuleLoader__.load({
      * 按钮只有两个：「使用」（置顶，下次请求即用它）与「删除」。
      */
     function AccountCard(props) {
-      const { account, balance, busy, isNext, confirmId, setConfirmId, onUse, onRemove, onRename } = props
+      const { account, balance, busy, isNext, modelListVisible, onToggleModelList, confirmId, setConfirmId, onUse, onRemove, onRename } = props
       /** Host 下发的是 `modelRateLimits` 对象（model → resetAt），摊平成 chips。 */
       const limited = Object.entries(account.modelRateLimits ?? {})
         .map(([model, resetAt]) => ({ model, resetAt }))
@@ -192,9 +224,12 @@ window.__ModuleLoader__.load({
         balance.total > 0
           ? Math.max(0, Math.min(100, Math.round(((balance.remaining ?? 0) / balance.total) * 100)))
           : undefined
+      const toggleTitle = modelListVisible === true
+        ? '在模型列表中显示这一栏（点此隐藏）'
+        : '该账号的模型栏位已隐藏，点此恢复显示'
       return h(
         'div',
-        { className: 'zsp-card', 'data-next': isNext === true },
+        { className: 'zsp-card', 'data-next': isNext === true, 'data-hidden': modelListVisible === false },
         h(
           'div',
           { className: 'zsp-row' },
@@ -216,6 +251,13 @@ window.__ModuleLoader__.load({
               `${item.model} 限额至 ${formatReset(item.resetAt)}`,
             ),
           ),
+          /** 每栏最右侧的「显示在模型列表」开关。 */
+          h(Toggle, {
+            checked: modelListVisible === true,
+            disabled: busy,
+            title: toggleTitle,
+            onChange: (next) => onToggleModelList(next),
+          }),
         ),
         balance === undefined
           ? null
@@ -589,12 +631,14 @@ window.__ModuleLoader__.load({
 
       /** 插件列表页的摘要视图：一行文本，不发起请求。 */
       if ((props || {}).view === 'summary') {
-        return '管理 ZCode 赠送免费 plan 的账号池：选择使用的账号、查看余额与限流、面板内登录添加账号（bigmodel / z.ai）。'
+        return '管理 ZCode 赠送免费 plan 的账号池：每账号一个模型栏位（各吃各的额度）、统一选号开关、余额与限流、面板内登录添加账号（bigmodel / z.ai）。'
       }
 
       const accounts = data !== undefined && Array.isArray(data.accounts) ? data.accounts : undefined
       /** 「按序下一个」= 列表里第一个启用的账号（pool.pick 的取号规则）。 */
       const nextAccount = accounts !== undefined ? accounts.find((account) => account.enabled === true) : undefined
+      /** 统一选号栏位当前是否显示（关掉 = 模型列表只留每账号一栏）。 */
+      const unifiedVisible = data?.unifiedModelList !== false
 
       return h(
         'section',
@@ -620,22 +664,48 @@ window.__ModuleLoader__.load({
         accounts !== undefined && accounts.length === 0
           ? h('span', { className: 'zsp-muted' }, '账号池为空：用上方「添加账号」登录，或在插件目录运行 node bin/cli.mjs login。')
           : null,
-        accounts !== undefined
-          ? accounts.map((account) =>
-              h(AccountCard, {
-                key: account.id,
-                account,
-                balance: balances[account.id],
-                busy,
-                isNext: nextAccount !== undefined && nextAccount.id === account.id,
-                confirmId,
-                setConfirmId,
-                onUse: () => void act('/use', { id: account.id }),
-                onRemove: () => void act('/remove', { id: account.id }),
-                onRename: (nickname) => void act('/rename', { id: account.id, nickname }),
+        /**
+         * 账号区方块：最顶一行是「统一选号」+ 贴方块右上角的开关，
+         * 下面是各账号卡片 —— 面板顺序 = 模型选择器顺序。
+         */
+        h(
+          'div',
+          { className: 'zsp-group' },
+          h(
+            'div',
+            { className: 'zsp-row' },
+            h('span', { className: 'zsp-dot', 'data-on': unifiedVisible === true }),
+            h('span', { className: 'zsp-name' }, '统一选号'),
+            h(
+              'span',
+              { className: 'zsp-toggle-row' },
+              h(Toggle, {
+                checked: unifiedVisible === true,
+                disabled: busy,
+                title: unifiedVisible ? '在模型列表中显示统一选号栏（点此隐藏）' : '统一选号栏已隐藏，点此恢复显示',
+                onChange: (visible) => void act('/unified-list', { visible }),
               }),
-            )
-          : null,
+            ),
+          ),
+          accounts !== undefined
+            ? accounts.map((account) =>
+                h(AccountCard, {
+                  key: account.id,
+                  account,
+                  balance: balances[account.id],
+                  busy,
+                  isNext: nextAccount !== undefined && nextAccount.id === account.id,
+                  modelListVisible: account.modelListVisible !== false,
+                  onToggleModelList: (visible) => void act('/model-list-visible', { id: account.id, visible }),
+                  confirmId,
+                  setConfirmId,
+                  onUse: () => void act('/use', { id: account.id }),
+                  onRemove: () => void act('/remove', { id: account.id }),
+                  onRename: (nickname) => void act('/rename', { id: account.id, nickname }),
+                }),
+              )
+            : null,
+        ),
         data !== undefined && data.storeInMemory === true
           ? h(
               'span',

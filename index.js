@@ -44,6 +44,10 @@ export const name = 'zcode-start-plan'
  * - `tools` 注册 `zcode_start_plan_status` 状态工具
  * - `timer` 每小时清理过期的「账号×模型」限流标记
  * - `webServer` 注册账号池管理路由（Web UI 面板的数据通道；可选增强）
+ *
+ * ⚠ 图片输入**不**走 inject：cordis 的 inject 是硬依赖（声明的服务缺席时整个
+ * fiber 挂起，插件完全不加载）。附件服务经沙箱 façade 的 `ctx.get('attachments')`
+ * 探测（宿主允许未声明查询），缺席时图片消息降级为占位文本，主功能不受影响。
  */
 export const inject = ['llm', 'tools', 'timer', 'webServer']
 
@@ -56,6 +60,13 @@ const DEFAULT_CONFIG = Object.freeze({
   displayName: 'ZCode Start Plan（赠送免费 plan）',
   /** 暴露给 DSH 的模型 id 列表（与上游模型目录求交集；拉不到时直接用这份）。 */
   models: DEFAULT_MODELS,
+  /**
+   * 为每个启用账号注册一个独立的 provider 栏位（像 workbuddy 一样一栏一个
+   * 账号，路由名 `<provider>-acct-<账号id>`、显示名「ZCode Start Plan · 昵称」），
+   * 选中即只消耗该账号的额度，不自动换号。关闭后只有统一选号栏位。
+   * （0.3.0 的 `pinnedAccounts` 同义更名，旧值仍被接受。）
+   */
+  accountProviders: true,
   /** 上游模型目录缓存时长（毫秒）。 */
   modelCacheMs: 10 * 60_000,
   /** 数据目录（空 = ~/.dsh/zcode-start-plan）。 */
@@ -101,6 +112,10 @@ export function resolveConfig(raw) {
   out.endpoint = { ...DEFAULT_CONFIG.endpoint, ...(src.endpoint ?? {}) }
   if (src.models === undefined || src.models === null) out.models = [...DEFAULT_CONFIG.models]
   else if (Array.isArray(src.models)) out.models = src.models.length > 0 ? src.models.slice() : [...DEFAULT_CONFIG.models]
+  /** 0.3.0 的 `pinnedAccounts` 同义更名：旧名仍被接受，新名优先。 */
+  if (src.accountProviders === undefined && typeof src.pinnedAccounts === 'boolean') {
+    out.accountProviders = src.pinnedAccounts
+  }
   return out
 }
 
@@ -181,6 +196,9 @@ export function validateConfig(value) {
   if (!Array.isArray(out.models) || !out.models.every((id) => typeof id === 'string')) {
     throw new Error('config.models 必须是字符串数组')
   }
+  if (typeof out.accountProviders !== 'boolean') {
+    throw new Error('config.accountProviders 必须是布尔值')
+  }
   if (!Number.isInteger(out.modelCacheMs) || out.modelCacheMs < 0) {
     throw new Error('config.modelCacheMs 必须是非负整数')
   }
@@ -213,6 +231,7 @@ export const Config = makeConfigSchema(validateConfig, {
   provider: PROVIDER,
   displayName: 'ZCode Start Plan（赠送免费 plan）',
   models: [...DEFAULT_MODELS],
+  accountProviders: true,
   modelCacheMs: 10 * 60_000,
   dataDir: '',
   channel: 'cn',
@@ -235,6 +254,9 @@ export const Config = makeConfigSchema(validateConfig, {
  * 因此：**用到哪个服务就必须在 `inject` 里声明**。本插件用到
  * `llm`（注册适配器）、`tools`（状态工具）、`timer`（定期清理）、
  * `webServer`（账号池管理路由，供插件 Web UI 面板调用）。
+ * 后两处都有容错（服务不可用时面板路由跳过 / 图片降级占位文本）。
+ * 图片输入的附件服务**刻意不进 inject**（硬依赖会把插件整体挂起），
+ * 由 assemble 在建资源时用 `ctx.get('attachments')` 探测。
  *
  * 另外 `ctx.effect` 在沙箱里可用（它不是服务，是 ctx 动词），
  * 而 `ctx.emit` / `ctx.on` / `ctx.setInterval` **不可用** ——
