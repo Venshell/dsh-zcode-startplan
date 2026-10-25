@@ -1,6 +1,6 @@
 {
   "name": "dsh-zcode-startplan",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "DSH 接入 ZCode 赠送免费 plan（account:bigmodel-start-plan）：多账号池 + 按需阿里云 captcha + 直连 zcode-plan/anthropic 的 llm 适配器。移植自 gitee.com/iJetLi/bonus-plan-4-open-zcode。",
   "type": "module",
   "license": "GPL-3.0-or-later",

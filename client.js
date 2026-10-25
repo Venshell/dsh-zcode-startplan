@@ -88,7 +88,13 @@ window.__ModuleLoader__.load({
       .zsp-option-text{display:flex;flex-direction:column;min-width:0}
       .zsp-badge{flex:none;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:5px;font-size:10px;font-weight:700;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
       .zsp-toggle-row{margin-left:auto;display:inline-flex;align-items:center;gap:6px;flex:none;color:var(--dsw-alias-label-tertiary);font-size:11px}
-      .zsp-toggle{position:relative;display:inline-block;flex:none;width:30px;height:17px}
+      /**
+       * 三颗开关同列（不贴边）：卡片开关留在卡片内的自然位置（距卡片边框
+       * 12px，缩进 1+12+1+12=26px）；统一行比卡片少一层卡片边框+内边距
+       * （13px），补 13px 内边距对齐到同一条竖线。
+       */
+      .zsp-unified{padding-right:13px}
+      .zsp-toggle{position:relative;display:inline-block;flex:none;width:30px;height:17px;margin-left:auto}
       .zsp-toggle input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}
       .zsp-toggle-track{position:absolute;inset:0;border-radius:999px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);transition:background .15s ease,border-color .15s ease;pointer-events:none}
       .zsp-toggle-track::after{content:'';position:absolute;top:1px;left:1px;width:13px;height:13px;border-radius:50%;background:var(--dsw-alias-label-primary);transition:transform .15s ease}
@@ -125,15 +131,15 @@ window.__ModuleLoader__.load({
      * checked = 显示；原生 checkbox 保证可访问性（键盘/读屏）。
      */
     function Toggle(props) {
-      const { checked, disabled, title, onChange } = props
+      const { checked, disabled, onChange } = props
       return h(
         'label',
-        { className: 'zsp-toggle', title },
+        { className: 'zsp-toggle' },
         h('input', {
           type: 'checkbox',
           checked: checked === true,
           disabled,
-          'aria-label': title,
+          'aria-label': '在模型列表中显示这一栏',
           onChange: (event) => onChange(event.target.checked),
         }),
         h('span', { className: 'zsp-toggle-track', 'aria-hidden': 'true' }),
@@ -224,9 +230,6 @@ window.__ModuleLoader__.load({
         balance.total > 0
           ? Math.max(0, Math.min(100, Math.round(((balance.remaining ?? 0) / balance.total) * 100)))
           : undefined
-      const toggleTitle = modelListVisible === true
-        ? '在模型列表中显示这一栏（点此隐藏）'
-        : '该账号的模型栏位已隐藏，点此恢复显示'
       return h(
         'div',
         { className: 'zsp-card', 'data-next': isNext === true, 'data-hidden': modelListVisible === false },
@@ -251,11 +254,10 @@ window.__ModuleLoader__.load({
               `${item.model} 限额至 ${formatReset(item.resetAt)}`,
             ),
           ),
-          /** 每栏最右侧的「显示在模型列表」开关。 */
+          /** 每栏最右侧的开关：负 margin 拉出卡片缩进，与统一行的开关同列。 */
           h(Toggle, {
             checked: modelListVisible === true,
             disabled: busy,
-            title: toggleTitle,
             onChange: (next) => onToggleModelList(next),
           }),
         ),
@@ -673,7 +675,7 @@ window.__ModuleLoader__.load({
           { className: 'zsp-group' },
           h(
             'div',
-            { className: 'zsp-row' },
+            { className: 'zsp-row zsp-unified' },
             h('span', { className: 'zsp-dot', 'data-on': unifiedVisible === true }),
             h('span', { className: 'zsp-name' }, '统一选号'),
             h(
@@ -682,7 +684,6 @@ window.__ModuleLoader__.load({
               h(Toggle, {
                 checked: unifiedVisible === true,
                 disabled: busy,
-                title: unifiedVisible ? '在模型列表中显示统一选号栏（点此隐藏）' : '统一选号栏已隐藏，点此恢复显示',
                 onChange: (visible) => void act('/unified-list', { visible }),
               }),
             ),
