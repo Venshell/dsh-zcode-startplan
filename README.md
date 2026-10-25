@@ -13,7 +13,7 @@
   但形态不同——它做的是 ZCode 插件（本地代理），这里直接实现 **`ctx.llm` 适配器**，
   选号、captcha、切号、重试全在 DSH 进程内完成
 
-[![dsh.so install · dsh 0.4.5](https://www.dsh.so/badge/install/dsh-zcode-startplan@0.4.5.svg)](https://www.dsh.so/artifact/dsh-zcode-startplan/) [![dsh.so risk](https://www.dsh.so/badge/dsh-zcode-startplan.svg)](https://www.dsh.so/artifact/dsh-zcode-startplan/)
+[![dsh.so risk](https://www.dsh.so/badge/dsh-zcode-startplan.svg)](https://www.dsh.so/artifact/dsh-zcode-startplan/)
 [![npm](https://img.shields.io/npm/v/dsh-zcode-startplan)](https://www.npmjs.com/package/dsh-zcode-startplan)
 [![license](https://img.shields.io/npm/l/dsh-zcode-startplan)](./LICENSE)
 [![release](https://img.shields.io/github/v/release/Venshell/dsh-zcode-startplan)](https://github.com/Venshell/dsh-zcode-startplan/releases)
