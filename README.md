@@ -13,6 +13,7 @@
   但形态不同——它做的是 ZCode 插件（本地代理），这里直接实现 **`ctx.llm` 适配器**，
   选号、captcha、切号、重试全在 DSH 进程内完成
 
+[![dsh.so install · dsh 0.4.5](https://www.dsh.so/badge/install/dsh-zcode-startplan@0.4.5.svg)](https://www.dsh.so/artifact/dsh-zcode-startplan/) [![dsh.so risk](https://www.dsh.so/badge/dsh-zcode-startplan.svg)](https://www.dsh.so/artifact/dsh-zcode-startplan/)
 [![npm](https://img.shields.io/npm/v/dsh-zcode-startplan)](https://www.npmjs.com/package/dsh-zcode-startplan)
 [![license](https://img.shields.io/npm/l/dsh-zcode-startplan)](./LICENSE)
 [![release](https://img.shields.io/github/v/release/Venshell/dsh-zcode-startplan)](https://github.com/Venshell/dsh-zcode-startplan/releases)
@@ -124,7 +125,7 @@ node bin/cli.mjs import .\zcode-jwt.txt --name <备注>
   模型选择器里。三颗开关（各账号栏 + 统一选号行）在视觉上对齐同一条竖线
   （卡片栏距卡片边框 26px，统一行补 13px 内边距拉齐）；tooltip 由动态文案改为
   固定 `aria-label`「在模型列表中显示这一栏」，读屏/键盘行为一致
-- **刷新**：一个按钮搞定（列表+余额一次拉全，缺失项自动补拉）
+- **刷新**：一个按钮搞定（列表+余额一次并行拉全）
 - 安全：面板与宿主之间走同源 fetch + loopback 路由，凭据永不出网关；
   登录授权的 `flowSecret` 只留在宿主内存
 
@@ -367,7 +368,7 @@ case "block-end":       partial.block = chunk.block
 ## 开发
 
 ```powershell
-node scripts/run-tests.mjs      # 80 个用例，单进程跑（沙箱里 spawn 会被拒）
+node scripts/run-tests.mjs      # 93 个用例，单进程跑（沙箱里 spawn 会被拒）
 node scripts/smoke-install.mjs  # 对**已安装**的插件跑真实接线（26 项）
 node scripts/verify_compat.mjs  # 兼容性门禁（peerDependencies 不会被判不兼容）
 node bin/cli.mjs help           # CLI 一览
