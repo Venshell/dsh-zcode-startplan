@@ -43,13 +43,22 @@ export const name = 'zcode-start-plan'
  * - `llm`   注册 provider 适配器（本插件的主用途）
  * - `tools` 注册 `zcode_start_plan_status` 状态工具
  * - `timer` 每小时清理过期的「账号×模型」限流标记
- * - `webServer` 注册账号池管理路由（Web UI 面板的数据通道；可选增强）
+ * - `webServer` 注册账号池管理路由（Web UI 面板的数据通道；**可选增强**）
  *
- * ⚠ 图片输入**不**走 inject：cordis 的 inject 是硬依赖（声明的服务缺席时整个
+ * 图片输入**不**走 inject：cordis 的 inject 是硬依赖（声明的服务缺席时整个
  * fiber 挂起，插件完全不加载）。附件服务经沙箱 façade 的 `ctx.get('attachments')`
  * 探测（宿主允许未声明查询），缺席时图片消息降级为占位文本，主功能不受影响。
+ *
+ * ⚠ **`webServer` 也不能进硬 inject**（0.4.4 的教训，两个方向都错）：
+ * - 写进 `inject` → headless profile 没有该服务时整个插件 fiber 挂起，连模型都没了；
+ * - **从 facade 上探测**（`ctx.webServer` / `ctx.get('webServer')`）→ 宿主只挂
+ *   **声明过的**服务，未声明即拿不到，路由静默不注册（面板永远 404，日志零输出）。
+ *
+ * 正解是 cordis 的**可选注入**：`ctx.inject(['webServer'], (webCtx) => …)`。
+ * 服务**出现时**回调才跑、**消失时**回调里登记的 effect 自动撤销，缺服务也不挂 fiber。
+ * 故 inject 里只留「缺了整个插件就没意义」的三个服务。
  */
-export const inject = ['llm', 'tools', 'timer', 'webServer']
+export const inject = ['llm', 'tools', 'timer']
 
 const PROVIDER = 'zcode-start-plan'
 
@@ -317,6 +326,29 @@ export function apply(ctx, rawConfig) {
         ctx.llm.emitAdaptersUpdated?.()
       } catch {
         // 老版本没有这个方法；选择器下次刷新自然会看到。
+      }
+
+      /**
+       * 账号面板的管理路由（**可选注入**，见文件头 `inject` 那段）。
+       *
+       * 必须放在 `init()` 之后：`assembled.register()` 只在资源就绪后才生效，
+       * 而回调里登记的 effect 也会随 `webServer` 服务下线自动撤销。
+       *
+       * ⚠ 单测/假 ctx 上没有 `ctx.inject`（沙箱 façade 逐版本在变），缺了就
+       * **明确告警**而不是静默跳过 —— 0.4.4 的「面板永远 404、日志零输出」
+       * 正是因为探测失败时静默。
+       */
+      if (typeof ctx.inject === 'function') {
+        ctx.inject(['webServer'], (webCtx) => {
+          try {
+            assembled.registerManageRoutes(webCtx)
+            log('账号面板路由已挂载（/api/zcode-start-plan/*）')
+          } catch (error) {
+            warn(`管理路由注册失败（账号面板不可用，其它功能不受影响）：${error instanceof Error ? error.message : String(error)}`)
+          }
+        })
+      } else {
+        warn('宿主 ctx 上没有 inject：跳过账号面板路由（模型与工具不受影响）')
       }
     })
     .catch((error) => {

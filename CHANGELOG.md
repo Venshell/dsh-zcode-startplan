@@ -3,6 +3,273 @@
 本文件记录**每次修复背后的宿主契约**。只看 diff 看不出「为什么不能改回去」，
 所以把约束与症状一起写下来。
 
+## 0.5.2 — 额度到期时间（绝对时间 + 相对时长）
+
+### 需求
+
+面板只知道「还剩多少」，不知道「什么时候作废」。免费额度按自然日结算，
+到点不清零就会被误当成 bug 排查。
+
+### 数据来源（实测）
+
+| 字段 | 位置 | 语义 |
+|---|---|---|
+| `balances[].expires_at` | 每个额度桶 | **该桶**的到期时间（主号两个桶都是当天 23:59:59 +08） |
+| `plans[].ends_at` | 计划级 | 未生效权益所在的 plan 整体作废时间（示例账号是次日 09:00） |
+
+⚠ 两个都是**秒级**。0.4.x 的 `fetchBalance` 直接 `num(item.expires_at)` 存了原值，
+毫秒语义的下游一用就会显示 1970 年 —— 这次统一用 `toEpochMs` 归一。
+
+### 实现
+
+- `fetchBalance`：桶的 `expiresAt` 归一到毫秒；顶层 `expiresAt` **只汇总还有余额的
+  桶**的最早到期时间（把一个空桶的到期当成额度到期是误导）；
+  `pending[]` 带上所属 plan 的 `endsAt`；
+- `manage-routes`：`/summary` 与 `/balance` 透传 `expiresAt`（`pending` 里也带）；
+- `client.js`：
+  - `QuotaMeter` caption 变成
+    `剩余 4298278/8000000 · GLM-5.3 · 23:59 到期（1 小时 20 分后）`；
+    未生效的为 `23:00 起可用 · 10/27 09:00 到期（10 小时后）`；
+  - 新增 `formatRemaining()`：`不到 1 分钟` / `N 分钟后` / `N 小时 M 分后` /
+    `N 天后` / `已过期`。绝对时间靠 `formatEffective`（今天只给时刻、跨天带日期）。
+
+### 测试
+
+- `fetchBalance` 3 个：秒→毫秒、只用有余额的桶汇总、全用光时不给顶层 `expiresAt`、
+  未生效权益带 plan 的 `endsAt`；
+- `formatRemaining` 8 个边界；`QuotaMeter` 3 个（含「没有到期信息时不能出现
+  undefined / NaN / 1970」）。共 132/132。
+
+### 实测
+
+```
+主号    : 剩余 4298278/8000000 · 到期 2026/10/26 23:59:59
+账号 B: pending GLM-5.3-Flash 3亿 @ 23:00 起 → 10/27 09:00 到期
+          pending GLM-5.3-Flash 1亿 @ 23:00 起 → 10/27 09:00 到期
+```
+
+## 0.5.1 — 面板白屏：ClaimSection 的 hook 顺序（0.5.0 自己引入的）
+
+### 症状
+
+升到 0.5.0 后整个插件面板不渲染（Web UI 里那片区域空了）。服务端一切正常：
+`/summary` 200、`adapterRegistered: true`、两个账号都在。
+
+### 根因
+
+0.5.0 在 `ClaimSection` 里把 `restart` 的 `useCallback` 加在了
+
+```js
+if (!Array.isArray(accounts) || accounts.length === 0) return null
+```
+
+**之后**。React 的规则是「每次渲染的 hook 数量与顺序必须一致」：
+
+| 情形 | 调用的 hook 数 |
+|---|---|
+| 账号为空 → 走到早退 | 4（state×3 + callback×2 中的 2 个） |
+| 有账号 → 继续往下 | 5（多一个 `restart`） |
+
+宿主是异步加载的：**首次渲染必定是 `accounts === []`**（数据未到），
+数据到达后变成有账号 → hook 数从 4 变 5 → React 抛
+`Rendered fewer hooks than expected` → **整块面板卸载成空白**。
+
+### 修复
+
+把 `restart` 移到早退**之前**，并加注释说明「所有 hooks 必须在任何早退之前」。
+
+### 回归闸
+
+`tests/client-panel.test.mjs` 的 fake React 改成**带 hook 计数**的桩：
+同一个组件先后渲染时 hook 数不一致就抛错（复刻 React 的行为）。
+新增用例「空账号池与有账号两次渲染，hook 数量必须一致」——
+它精确复现宿主「先空后有数据」的加载序列。
+
+已验证该闸门不是摆设：单独构造「有账号时多调一个 hook」的组件，
+桩会抛出 `hook 数变化 1→2`。
+
+## 0.5.0 — 面板一键「以调试模式重启」（领取 captcha 不再靠手抄）
+
+### 背景（一个常被误读的约束）
+
+**调用模型不需要调试端口** —— captcha 在推理链路里是**按需触发**的
+（`plan-client` 只在被上游 `3007` 拒过、且 2 分钟记忆窗口内才 mint）。
+实测：`captcha.reachable=false` 且 `captchaRequiredAccounts=0` 时，对话完全正常。
+
+只有**领取赠送额度**必须有 captcha：claim 接口硬性要求 `x-aliyun-captcha-verify-param`，
+每个 plan 一个新的。所以 0.4.9 那行「DSH 需以 --remote-debugging-port 启动」
+容易被读成全局前提，文案改为明确「仅领取需要，日常调用不受影响」。
+
+### 新增
+
+- `POST /api/zcode-start-plan/restart-cdp {debugPort?, waitSeconds?}`：
+  分离进程启动 `scripts/restart-dsh.ps1`，立刻回 200（不等重启完成）；
+- `client.js` 的「赠送额度」区：`captcha.reachable !== true` 时直接显示
+  **「以调试模式重启」**按钮，点了给出「窗口会关闭并自动重开」的提示；
+- `GET /summary` 新增 `captcha` 字段（`mode` / `debugPort` / `reachable` / `reason`），
+  **每次现探不缓存** —— 重启回来刷新必须立刻看到新状态；
+- `scripts/restart-dsh.ps1`：`-Exe` 改为可自动定位（显式路径 → 运行中主进程的
+  `ExecutablePath` → 常见安装位置），且**必须在杀进程之前**解析（进程一没就查不到）。
+
+### 为什么必须分离进程
+
+脚本的逻辑是「先睡 N 秒 → 杀掉宿主 → 拉起带参数的新实例」。若它挂在宿主的进程树里，
+宿主一死脚本跟着死，就没人拉起新实例了 —— 用户会得到一个关掉的窗口。
+故 `spawn(..., { detached: true, stdio: 'ignore' })` + `child.unref()`。
+
+脚本本身带**失败回退**：CDP 端口起不来就不带参数重启，保证宿主仍可用，
+所以这个按钮不会把用户锁在坏状态里。
+
+### 测试
+
+`tests/claim-routes.test.mjs` 增加 4 个：参数透传、非法端口 400 且**不触发**重启、
+缺实现给 501（不假装成功）、实现抛错透出原因。共 123/123。
+
+## 0.4.9 — 面板内领取赠送额度（`/claimable` + `/claim`）
+
+### 之前的状况
+
+`bin/cli.mjs claim` 已有完整领取逻辑，但面板没接 —— 用户必须在命令行点。
+而且 `fetchClaimablePlans` 前**必须先 `reportActivation`**（不补活跃信号时
+`preview` 恒空），这条约束只写在 CLI 里，面板侧一旦漏掉就会永远显示「没有活动」。
+
+### 新增
+
+- `GET /api/zcode-start-plan/claimable?id=`：先补活跃上报，再查可领列表；
+- `POST /api/zcode-start-plan/claim {id, planId?}`：逐 plan 领取，`planId` 省略
+  = 领全部；
+- `client.js` 的 `ClaimSection`：面板底部「赠送额度」区，**按需展开**
+  （点「查看可领取」才打上游），每账号一行：`#序号 昵称 · 可领列表 · [领取] [重新查询]`。
+
+### 三条硬约束（都在 `/claim` 里落实）
+
+| 约束 | 后果 | 做法 |
+|---|---|---|
+| captcha **一次性** | 复用同一个 param → 必得 `3007` | 每个 plan 循环内重新 `mintCaptcha()` |
+| `1003` = 已领过 | 报红让用户以为失败 | 视为**幂等成功**（`alreadyClaimed: true`） |
+| mint 失败不能重试 | 连环重试烧设备信誉（有冷却惩罚） | captcha 失败立刻 `break`，且**不打 claim** |
+
+⚠ captcha 走 `deps.client.mintCaptcha`（`ZcodePlanClient` 的串行队列）而不是
+新起一个 minter：面板点击与推理链路可能同时要 captcha，产出是**设备级**的，
+两份会话会互相踩 CDP 页面。
+
+### 测试
+
+`tests/claim-routes.test.mjs`（7 个用例）：补上报后再查 preview、每 plan 换
+param、`1003` 幂等、指定 planId、captcha 失败即停且不打 claim、未知账号 404、缺 id 400。
+
+反向验证：把 captcha 提到循环外复用 → 3 条用例变红；恢复后 119/119。
+
+### 实测
+
+真账号跑 `/claimable`：`status 200 ok:true plans:[]` —— 上游确实没有可领活动
+（不是链路错误）。有活动时面板会列出，点「领取」即可。
+
+## 0.4.8 — 未生效额度改为「同款进度条 + 底部启用时间」
+
+### 变更
+
+0.4.7 把未生效额度渲染成一枚 chip；用户期望与已生效额度**视觉同构**：
+一条进度条，未生效的那条底部写启用时间。故：
+
+- 抽出 `QuotaMeter` 组件，已生效 / 未生效**共用同一形状**（同 `zsp-bar` +
+  caption 结构），差别只有两处：
+  - 未生效的 `data-pending` → 条纹背景 + 半透明填充（「还没到点的钱」不能看成满格实色）；
+  - caption 文案：已生效 `剩余 X/Y · 计划名`；未生效 `23:00 起可用`；
+- 未生效的百分比固定 **100%**：尚未启用的额度必然是满的，不参与分母计算；
+- 额度大小（`GLM-5.3-Flash 3亿 tokens`）放在条下方的小字里，不再挤进 chip。
+
+### 测试
+
+新增 `tests/client-panel.test.mjs`：宿主注入 `React`，所以用最小 `createElement`
+桩把 `client.js` 里的组件**真渲染出来**做结构断言（不是字符串匹配），
+并展开函数组件节点。6 个用例覆盖：单条实色条 / 双条（一条条纹、底部带时间）/
+多条 pending / 缺 total 按 0% / 企业版与错误态不画条 / 跨天时间带日期。
+
+反向验证：删掉 `data-pending` → 2 条用例变红；恢复后 112/112。
+
+## 0.4.7 — 面板显示「未生效的领取额度」（`balances` 不含未来权益）
+
+### 症状
+
+某个账号领到 `ZCODE GLOBAL BUILD`（3 亿 GLM-5.3-Flash tokens，23:00 起用），
+面板卡片却显示 `剩余 0/0`——像领取失败，实际只是还没到点。
+
+### 根因（端点没缺数据，是解析丢了）
+
+`GET /billing/balance` 的 `data` 有**两个**集合：
+
+- `balances[]` —— 只列**当前生效**的桶（面板原来看的就是它）；
+- `plans[].entitlements[]` —— plan 的权益明细，未生效的条目带
+  `effective_at`（**秒级**）与 `grant_units`。
+
+23 点才启用的包在 22 点的 `balances` 里不存在 → 汇总自然是 0/0。
+`preview`（可领活动）为空与此无关，别混淆。
+
+### 修复
+
+- `fetchBalance`：扫 `plans[].entitlements[]`，`effective_at > server_time`
+  （缺省本地现在）且 `grant_units > 0` 的进 `pending[]`
+  （`{ planId, showName, unitType, grantUnits, effectiveAt }`，按到点时间升序）；
+  已生效的不收（`balances` 已覆盖）；秒级时间戳用 `toEpochMs` 归一；
+- `manage-routes` 的 `/summary` 与 `/balance`：`pending` 非空才下发该键；
+- `client.js`：卡片余额行下追加 chip
+  `GLM-5.3-Flash 3亿 tokens · 23:00 起可用`（跨天带日期）。
+
+### 实测
+
+```
+--- 账号 B: remaining=0 total=0 plan=-
+    pending: GLM-5.3-Flash 300000000 tokens @ 2026/10/26 23:00:00 (zcode-v3-start-plan-nt-1026)
+```
+
+⚠ `effective_at` 语义是**到点即可用**，不需要再点领取；到期自动并入 `balances`。
+
+## 0.4.6 — 面板 404：管理路由改用可选注入（`ctx.inject(['webServer'])`）
+
+### 症状
+
+设置 → 插件 → ZCode Start Plan 详情页，「账号池管理」下面是空白 + 红色 `HTTP 404`；
+插件本身显示「运行中」、模型可选、状态工具正常。宿主日志里**一个字都没有**。
+
+### 定位（实测，不是推测）
+
+- `GET /api/zcode-start-plan/summary` 直接落到宿主认证层：无 cookie 时 401
+  `unauthorized`（`dsh-client-connection` 的 `/api` **prefix 路由**先匹配），
+  **说明这不是 401 而是路由从未注册**；
+- 已安装的 0.4.4 `index.js` 把 `webServer` 从 `inject` 里移除了
+  （`inject = ['llm','tools','timer']`），却又在 `assemble.js` 里用
+  `ctx.webServer?.register` 探测 —— 宿主 facade **只挂声明过的服务**，
+  探测必然拿到 `undefined`，整个 `if` 块静默跳过；
+- 上游端点全部正常（`balance` 200、`messages` 200+业务码、`client/configs` 200），
+  与本问题无关。
+
+### 根因（两个方向都是错的）
+
+| 写法 | 后果 |
+|---|---|
+| `webServer` 进硬 `inject` | headless profile 没有该服务 → 整个插件 fiber 挂起，连模型都没了 |
+| 从 facade 探测 `ctx.webServer` | 未声明就拿不到 → 路由静默不注册 → 面板永远 404，日志零输出 |
+
+### 修复
+
+- `index.js`：`inject` 只留 `['llm','tools','timer']`；新增
+  `ctx.inject(['webServer'], (webCtx) => assembled.registerManageRoutes(webCtx))`
+  —— cordis **可选注入**：服务出现才注册，消失时回调内 effect 自动撤销；
+  宿主 ctx 没有 `inject` 时**明确 warn**，不再静默；
+- `lib/assemble.js`：`register()` 里删掉探测块，改为导出 `registerManageRoutes(webCtx)`；
+  路由注册统一走 `webCtx.webServer.register`，并把每条注册结果打日志
+  （`管理路由已注册：12 条`），`webServer`/`pool`/`adapter` 缺任何一个都会 warn 出具体原因；
+- `runtime.adapter` / `runtime.syncAdapterRoutes`：可见性开关的回调需要在
+  `register()` 之后仍能拿到适配器，故挂到 runtime 上而不是闭包私藏。
+
+### 回归闸
+
+`tests/e2e.test.mjs` 的 apply 用例不再假装 `ctx.webServer` 在 facade 上，
+改为提供 `ctx.inject` 模拟宿主可选注入，并断言 **12 条 exact 路由**真的进了路由表
+（其中 `/summary`、`/login/start`、`/login/poll` 必须存在）。
+反向验证：把注册那行注释掉 → 断言报「实际 0」；恢复后 93/93。
+
 ## 0.4.5 — 面板开关列对齐 + tooltip 去动态化
 
 ### 症状

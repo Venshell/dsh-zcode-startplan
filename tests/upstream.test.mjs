@@ -68,3 +68,183 @@ test('nextUtc8DayStartMs: 返回下一个 UTC+8 零点', () => {
   const next = nextUtc8DayStartMs(at)
   assert.equal(new Date(next).toISOString(), '2026-10-23T16:00:00.000Z')
 })
+
+/** fetchBalance 的假 fetch（固定响应）。 */
+function fakeFetch(payload, status = 200) {
+  return async () => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => payload,
+  })
+}
+
+test('fetchBalance: balances 汇总剩余/总量（现行行为不变）', async () => {
+  const { fetchBalance } = await import('../lib/upstream-api.js')
+  const balance = await fetchBalance({ zcode_jwt: 'j', device_mid: 'd' }, fakeFetch({
+    code: 0,
+    data: {
+      server_time: 1_793_021_836,
+      plans: [],
+      balances: [
+        { show_name: 'GLM-5.3', unit_type: 'token', total_units: 8_000_000, used_units: 123_956, remaining_units: 7_876_044, available_units: 7_876_044 },
+      ],
+    },
+  }))
+  assert.equal(balance.remaining, 7_876_044)
+  assert.equal(balance.total, 8_000_000)
+  assert.equal(balance.planName, 'GLM-5.3')
+  assert.equal(balance.pending, undefined, '无未生效权益时不下发 pending 键')
+})
+
+test('fetchBalance: 未生效的 plan entitlement 进 pending（23 点启用 3 亿包实测形状）', async () => {
+  const { fetchBalance } = await import('../lib/upstream-api.js')
+  // 2026-10-26 21:37 实测响应：balances 为空，额度在 plans[].entitlements 里，
+  // effective_at = 1793026800（23:00:00 +08）晚于 server_time。
+  const balance = await fetchBalance({ zcode_jwt: 'j', device_mid: 'd' }, fakeFetch({
+    code: 0,
+    data: {
+      server_time: 1_793_021_836,
+      plans: [
+        {
+          plan_id: 'zcode-v3-start-plan-nt-1026',
+          name: 'ZCODE GLOBAL BUILD',
+          status: 'active',
+          starts_at: 1_793_019_869,
+          ends_at: 1_793_062_800,
+          entitlements: [
+            {
+              entitlement_id: 'ent-1',
+              show_name: 'GLM-5.3-Flash',
+              meter: 'model_usage',
+              unit_type: 'token',
+              capabilities: ['model:glm-5.3-flash'],
+              grant_units: 300_000_000,
+              period: 'one_time',
+              priority: 101,
+              effective_at: 1_793_026_800,
+            },
+          ],
+        },
+      ],
+      balances: [],
+    },
+  }))
+  assert.equal(balance.remaining, 0)
+  assert.equal(balance.total, 0)
+  assert.equal(balance.pending?.length, 1)
+  assert.equal(balance.pending[0].showName, 'GLM-5.3-Flash')
+  assert.equal(balance.pending[0].grantUnits, 300_000_000)
+  assert.equal(balance.pending[0].effectiveAt, 1_793_026_800_000, '秒级时间戳必须归一成毫秒')
+  assert.equal(balance.pending[0].planId, 'zcode-v3-start-plan-nt-1026')
+})
+
+test('fetchBalance: 已生效的 entitlement 不进 pending（balances 已覆盖）', async () => {
+  const { fetchBalance } = await import('../lib/upstream-api.js')
+  const balance = await fetchBalance({ zcode_jwt: 'j', device_mid: 'd' }, fakeFetch({
+    code: 0,
+    data: {
+      server_time: 1_793_026_800, // 恰好等于 effective_at
+      plans: [
+        {
+          plan_id: 'p',
+          entitlements: [{ show_name: 'X', grant_units: 100, effective_at: 1_793_026_800 }],
+        },
+      ],
+      balances: [{ show_name: 'X', total_units: 100, remaining_units: 100 }],
+    },
+  }))
+  assert.equal(balance.pending, undefined)
+  assert.equal(balance.remaining, 100)
+})
+
+test('fetchBalance: grant_units 非正数 / 缺 effective_at 的条目跳过，多条按到点时间排序', async () => {
+  const { fetchBalance } = await import('../lib/upstream-api.js')
+  const balance = await fetchBalance({ zcode_jwt: 'j', device_mid: 'd' }, fakeFetch({
+    code: 0,
+    data: {
+      server_time: 1_000,
+      plans: [
+        {
+          plan_id: 'p',
+          entitlements: [
+            { show_name: 'later', grant_units: 50, effective_at: 3_000 },
+            { show_name: 'zero', grant_units: 0, effective_at: 2_000 },
+            { show_name: 'no-time', grant_units: 70 },
+            { show_name: 'earlier', grant_units: 10, effective_at: 2_000 },
+          ],
+        },
+      ],
+      balances: [],
+    },
+  }))
+  assert.equal(balance.pending?.length, 2, '零额度与缺时间的要跳过')
+  assert.deepEqual(balance.pending.map((item) => item.showName), ['earlier', 'later'])
+})
+
+test('fetchBalance: 企业版形态不变（不解析 pending）', async () => {
+  const { fetchBalance } = await import('../lib/upstream-api.js')
+  const balance = await fetchBalance({ zcode_jwt: 'j', device_mid: 'd' }, fakeFetch({
+    code: 0,
+    data: { displayMode: 'enterprise', plans: [{ entitlements: [{ grant_units: 5, effective_at: 9_999 }] }] },
+  }))
+  assert.equal(balance.enterprise, true)
+  assert.equal(balance.pending, undefined)
+})
+
+test('fetchBalance: expires_at 秒级归一成毫秒，且只汇总还有余额的桶', async () => {
+  const { fetchBalance } = await import('../lib/upstream-api.js')
+  // 2026-10-26 实测：两个桶的 expires_at 都是 1793030399（当天 23:59:59 +08）
+  const balance = await fetchBalance({ zcode_jwt: 'j', device_mid: 'd' }, fakeFetch({
+    code: 0,
+    data: {
+      server_time: 1_793_022_000,
+      plans: [],
+      balances: [
+        { show_name: 'GLM-5.3', total_units: 3_000_000, used_units: 0, remaining_units: 3_000_000, available_units: 3_000_000, expires_at: 1_793_030_399 },
+        { show_name: 'GLM-5.3-Flash', total_units: 5_000_000, used_units: 5_000_000, remaining_units: 0, available_units: 0, expires_at: 1_800_000_000 },
+      ],
+    },
+  }))
+  assert.equal(balance.expiresAt, 1_793_030_399_000, '秒级必须归一成毫秒（否则界面显示 1970）')
+  /**
+   * 已用光的 Flash 桶（expires_at 更晚）不能参与顶层汇总 —— 否则会给出
+   * 「一个空桶的到期时间」，误导用户以为还有额度。
+   */
+  assert.notEqual(balance.expiresAt, 1_800_000_000_000)
+  assert.equal(balance.buckets[1].expiresAt, 1_800_000_000_000, '每个桶仍保留自己的到期时间')
+})
+
+test('fetchBalance: 所有桶都用光时不给顶层 expiresAt', async () => {
+  const { fetchBalance } = await import('../lib/upstream-api.js')
+  const balance = await fetchBalance({ zcode_jwt: 'j', device_mid: 'd' }, fakeFetch({
+    code: 0,
+    data: {
+      server_time: 1_793_022_000,
+      plans: [],
+      balances: [
+        { show_name: 'X', total_units: 100, used_units: 100, remaining_units: 0, available_units: 0, expires_at: 1_793_030_399 },
+      ],
+    },
+  }))
+  assert.equal(balance.expiresAt, undefined)
+  assert.equal(balance.remaining, 0)
+})
+
+test('fetchBalance: 未生效权益带上 plan 的 ends_at 作为到期时间', async () => {
+  const { fetchBalance } = await import('../lib/upstream-api.js')
+  const balance = await fetchBalance({ zcode_jwt: 'j', device_mid: 'd' }, fakeFetch({
+    code: 0,
+    data: {
+      server_time: 1_793_021_836,
+      plans: [
+        {
+          plan_id: 'p1',
+          ends_at: 1_793_062_800,
+          entitlements: [{ show_name: 'GLM-5.3-Flash', grant_units: 300_000_000, effective_at: 1_793_026_800 }],
+        },
+      ],
+      balances: [],
+    },
+  }))
+  assert.equal(balance.pending[0].expiresAt, 1_793_062_800_000)
+})

@@ -237,11 +237,16 @@ test('apply：等 llm 出现后注册 adapter + 状态工具，dispose 时收尾
   const intervals = []
   const routes = []
   /**
-   * 宿主的 `ctx` 是**沙箱 façade**：只暴露 `inject` 声明过的服务。
+   * 宿主的 `ctx` 是**沙箱 facade**：只暴露 `inject` 声明过的服务。
    * 实测（一次性诊断插件）：`Object.keys(ctx)` 仅 `['fiber']`；
    * 碰未声明的服务直接抛 `cannot get property "tools" without inject`。
-   * 因此这里按插件的 `inject` 列表（llm/tools/timer/webServer）提供服务，
-   * 并**不提供** `emit` / `on` / `setInterval` / `inject` —— 沙箱里没有它们。
+   * 因此这里按插件的 `inject` 列表（llm/tools/timer）提供服务，
+   * 并**不提供** `emit` / `on` / `setInterval`。
+   *
+   * ⚠ `webServer` **不在 facade 上**（它走可选注入 `ctx.inject(['webServer'], …)`）：
+   * 这里提供 `inject` 实现来模拟宿主：服务已就绪则立即回调，并把 webServer
+   * 交进去。0.4.4 的「面板永远 404」正是因为从 facade 上探测 `ctx.webServer`
+   * —— 永远拿不到 —— 而静默跳过注册。
    */
   const ctx = {
     logger: { info() {}, warn() {} },
@@ -260,11 +265,26 @@ test('apply：等 llm 出现后注册 adapter + 状态工具，dispose 时收尾
         return () => {}
       },
     },
-    webServer: {
-      register: (route) => {
-        routes.push(route)
-        return () => {}
-      },
+    /**
+     * 可选注入：宿主只把 `{ webServer }` 这一小份 service 交给回调。
+     * 回调里用的 `webCtx.effect` 由宿主托管，这里同样交给 disposers 收集。
+     */
+    inject(services, callback) {
+      assert.deepEqual(services, ['webServer'])
+      callback({
+        webServer: {
+          register: (route) => {
+            routes.push(route)
+            return () => {}
+          },
+        },
+        effect(fn) {
+          const disposer = fn()
+          if (typeof disposer === 'function') disposers.push(disposer)
+          return disposer
+        },
+      })
+      return () => {}
     },
     effect(fn) {
       /**
@@ -289,6 +309,21 @@ test('apply：等 llm 出现后注册 adapter + 状态工具，dispose 时收尾
   assert.equal(tools.length, 1)
   assert.equal(tools[0].name, 'zcode_start_plan_status')
   assert.deepEqual(intervals, [60 * 60_000], '应通过 ctx.timer.interval 注册每小时清理')
+
+  /**
+   * ⚠ 面板 404 的回归闸：管理路由必须经**可选注入**挂到 `webServer` 上。
+   * 0.4.4 从 facade 探测 `ctx.webServer` → 拿不到 → 静默跳过 → 面板永远 404。
+   * 这里断言 15 条 `/api/zcode-start-plan/*` 路由真的注册进了路由表。
+   */
+  assert.equal(routes.length, 15, `应注册 15 条账号面板路由，实际 ${routes.length}`)
+  const paths = routes.map((route) => route.path).sort()
+  assert.ok(paths.includes('/api/zcode-start-plan/summary'), '缺少 /summary（面板首次加载就靠它）')
+  assert.ok(paths.includes('/api/zcode-start-plan/login/start'), '缺少 /login/start')
+  assert.ok(paths.includes('/api/zcode-start-plan/login/poll'), '缺少 /login/poll')
+  assert.ok(paths.includes('/api/zcode-start-plan/claimable'), '缺少 /claimable（赠送额度查询）')
+  assert.ok(paths.includes('/api/zcode-start-plan/claim'), '缺少 /claim（赠送额度领取）')
+  assert.ok(paths.includes('/api/zcode-start-plan/restart-cdp'), '缺少 /restart-cdp（以调试端口重启）')
+  assert.ok(routes.every((route) => route.kind === 'exact'), '路由必须都是 exact kind')
 
   const status = await tools[0].execute()
   assert.equal(status.provider, 'zcode-start-plan')

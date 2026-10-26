@@ -66,6 +66,14 @@ window.__ModuleLoader__.load({
       .zsp-chip[data-limited=true]{color:var(--dsw-alias-label-danger);border-color:var(--dsw-alias-label-danger)}
       .zsp-bar{height:6px;border-radius:3px;background:var(--dsw-alias-bg-layer-2);overflow:hidden;width:100%}
       .zsp-bar>span{display:block;height:100%;background:var(--dsw-alias-state-business-primary)}
+      /**
+       * 未生效额度：同一条进度条，但**用条纹 + 半透明**区分「还没到点的钱」，
+       * 避免与已生效的满格条混淆（满格实色 = 现在就能用）。
+       */
+      .zsp-meter{display:flex;flex-direction:column;gap:4px;min-width:0}
+      .zsp-meter-caption{margin:0}
+      .zsp-bar[data-pending=true]{background:repeating-linear-gradient(45deg,var(--dsw-alias-bg-layer-2) 0 4px,var(--dsw-alias-border-l1) 4px 8px)}
+      .zsp-bar[data-pending=true]>span{background:var(--dsw-alias-state-business-primary);opacity:.45}
       .zsp-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
       .zsp-add{display:flex;flex-direction:column;gap:8px;border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;padding:10px 12px;min-width:0}
       .zsp-link{color:var(--dsw-alias-state-business-primary);word-break:break-all}
@@ -160,6 +168,100 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 未生效额度的到点时间：跨天要带日期（「明天 23:00」看不出来是哪天），
+     * 今天内只显示时刻，与限额 chips 的风格一致。
+     */
+    function formatEffective(effectiveAt) {
+      const ms = Number(effectiveAt)
+      if (!Number.isFinite(ms) || ms <= 0) return ''
+      const date = new Date(ms)
+      const today = new Date()
+      const sameDay =
+        date.getFullYear() === today.getFullYear() &&
+        date.getMonth() === today.getMonth() &&
+        date.getDate() === today.getDate()
+      return sameDay
+        ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : date.toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    }
+
+    /** 未生效额度的可读文案：`GLM-5.3-Flash 3亿 tokens` 之类。 */
+    function formatPendingUnits(pending) {
+      const units = Number(pending?.grantUnits)
+      if (!Number.isFinite(units) || units <= 0) return ''
+      if (units >= 100_000_000) return `${(units / 100_000_000).toFixed(units % 100_000_000 === 0 ? 0 : 1)}亿`
+      if (units >= 10_000) return `${Math.round(units / 10_000)}万`
+      return String(units)
+    }
+
+    /**
+     * 还多久到期，如「3 小时后」「12 分钟后」「2 天后」「已过期」。
+     *
+     * 为什么还要给相对时长：额度按自然日结算，看到的永远是「今天 23:59」这种
+     * 绝对时间，用户得心算「那还剩多久」。两者并排给，判断成本最低。
+     */
+    function formatRemaining(expiresAt, now = Date.now()) {
+      const ms = Number(expiresAt)
+      if (!Number.isFinite(ms) || ms <= 0) return ''
+      const diff = ms - now
+      if (diff <= 0) return '已过期'
+      const minutes = Math.floor(diff / 60_000)
+      if (minutes < 1) return '不到 1 分钟'
+      if (minutes < 60) return `${minutes} 分钟后`
+      const hours = Math.floor(minutes / 60)
+      if (hours < 24) {
+        const restMinutes = minutes % 60
+        return restMinutes === 0 ? `${hours} 小时后` : `${hours} 小时 ${restMinutes} 分后`
+      }
+      const days = Math.floor(hours / 24)
+      const restHours = hours % 24
+      return restHours === 0 ? `${days} 天后` : `${days} 天 ${restHours} 小时后`
+    }
+
+    /**
+     * 一条额度进度条（已生效 / 未生效共用同一形状）。
+     *
+     * 为什么共用一个组件：两种额度对用户是**同一件事的两种时态**——
+     * 已生效的现在就能用，未生效的到点就能用。形状一致，差别只在
+     * 条纹（`data-pending`）与底部那句提示。
+     *
+     * `remaining`/`total` 缺失时（未生效的只有 `grantUnits`）按满格画：
+     * 尚未启用的额度必然是 100% 剩余。
+     */
+    function QuotaMeter(props) {
+      const { remaining, total, planName, pending, effectiveAt, expiresAt } = props
+      const percent = pending === true
+        ? 100
+        : typeof total === 'number' && total > 0 && typeof remaining === 'number'
+          ? Math.max(0, Math.min(100, Math.round((remaining / total) * 100)))
+          : 0
+      /**
+       * 底部一句话：已生效 = 剩余 + 计划名 + 到期；未生效 = 何时启用 + 何时作废。
+       * 到期信息缺失（上游没给 / 已用光）时整段不出现，不留「undefined」。
+       */
+      const effectiveLabel = effectiveAt ? `${formatEffective(effectiveAt)} 起可用` : '待生效'
+      const expireLabel = expiresAt
+        ? `${formatEffective(expiresAt)} 到期（${formatRemaining(expiresAt)}）`
+        : ''
+      return h(
+        'div',
+        { className: 'zsp-meter' },
+        h(
+          'div',
+          { className: 'zsp-bar', 'data-pending': pending === true },
+          h('span', { style: { width: `${percent}%` } }),
+        ),
+        h(
+          'span',
+          { className: 'zsp-muted zsp-meter-caption' },
+          pending === true
+            ? `${effectiveLabel}${expireLabel ? ` · ${expireLabel}` : ''}`
+            : `剩余 ${remaining}/${total}${planName ? ` · ${planName}` : ''}${expireLabel ? ` · ${expireLabel}` : ''}`,
+        ),
+      )
+    }
+
+    /**
      * 卡片标题行的可编辑昵称：点一下变输入框，Enter 提交 / Esc 或失焦取消。
      * 什么都不填直接失焦 = 不改名。
      */
@@ -213,6 +315,176 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 赠送额度领取区（面板底部，按账号一行）。
+     *
+     * 为什么是独立区块而不是塞进 AccountCard：领取是**低频、且有副作用**的动作
+     * （要 captcha 载体、会烧设备信誉），不该和「使用/删除」这类日常按钮挤在一起；
+     * 而且 `claimable` 每次都要打上游 + 补活跃上报，全账号常驻轮询是浪费。
+     * 故做成**按需展开**：点「查看可领取」才拉一次。
+     *
+     * ⚠ 领取必须逐个 plan **重新 mint captcha**（param 一次性，复用必 3007）——
+     * 这条约束在宿主侧的 /claim 里落实，面板只发起一次请求。
+     */
+    function ClaimSection(props) {
+      const { accounts, busy, onClaimed, captcha } = props
+      /** accountId → { loading, plans, error, results } */
+      const [state, setState] = useState({})
+      const [open, setOpen] = useState(false)
+      const [restarting, setRestarting] = useState(false)
+
+      const patch = (id, next) => setState((prev) => ({ ...prev, [id]: { ...prev[id], ...next } }))
+
+      const inspect = useCallback(async (id) => {
+        patch(id, { loading: true, error: undefined, results: undefined })
+        try {
+          const data = await api(`/claimable?id=${encodeURIComponent(id)}`)
+          patch(id, { loading: false, plans: Array.isArray(data.plans) ? data.plans : [], error: data.ok === false ? data.error : undefined })
+        } catch (caught) {
+          patch(id, { loading: false, plans: [], error: caught instanceof Error ? caught.message : String(caught) })
+        }
+      }, [])
+
+      const claim = useCallback(
+        async (id) => {
+          patch(id, { loading: true, error: undefined, results: undefined })
+          try {
+            const data = await api('/claim', { id })
+            patch(id, { loading: false, results: Array.isArray(data.results) ? data.results : [], message: data.message })
+            /** 领取会改变余额（或生成 pending），刷新面板让进度条同步。 */
+            if (typeof onClaimed === 'function') await onClaimed()
+          } catch (caught) {
+            patch(id, { loading: false, error: caught instanceof Error ? caught.message : String(caught) })
+          }
+        },
+        [onClaimed],
+      )
+
+      /**
+       * ⚠ 所有 hooks 必须在任何早退之前调用。
+       * 0.5.0 曾把这个 useCallback 放在 `if (!Array.isArray(accounts)) return null`
+       * 之**后**：账号为空时少调一个 hook、非空时多调一个，React 直接抛
+       * 「Rendered fewer hooks than expected」→ 整个面板白屏。
+       */
+      const restart = useCallback(async () => {
+        setRestarting(true)
+        try {
+          await api('/restart-cdp', { debugPort: captcha?.debugPort ?? 9229 })
+          /**
+           * 宿主马上要自己关掉，本页面必然断开：不要假装成功，
+           * 直接告诉用户去哪儿重新打开。
+           */
+          setState((prev) => ({
+            ...prev,
+            __restart: '即将以调试模式重启，窗口会关闭并自动重新打开；稍后在浏览器里刷新本页面。',
+          }))
+        } catch (caught) {
+          setState((prev) => ({ ...prev, __restart: `重启失败：${caught instanceof Error ? caught.message : String(caught)}` }))
+        } finally {
+          setRestarting(false)
+        }
+      }, [captcha])
+
+      if (!Array.isArray(accounts) || accounts.length === 0) return null
+
+      /** captcha 载体是否可用（来自 /summary 的 captcha 探测结果）。 */
+      const captchaReachable = captcha !== undefined && captcha.reachable === true
+      const captchaReason = captcha?.reason
+
+      return h(
+        'div',
+        { className: 'zsp-group' },
+        h(
+          'div',
+          { className: 'zsp-row' },
+          h('span', { className: 'zsp-name' }, '赠送额度'),
+          h(
+            'span',
+            { className: 'zsp-muted' },
+            captchaReachable
+              ? '领取需要一次人机验证（captcha 载体已就绪）'
+              : '领取需要一次人机验证；**日常调用模型不受影响**，只有领取才需要',
+          ),
+          h('span', { className: 'zsp-spacer' }),
+          /** 载体不可用时直接给解法，而不是让用户去手抄 param。 */
+          captchaReachable
+            ? null
+            : h(
+                'button',
+                {
+                  className: 'zsp-btn',
+                  onClick: () => void restart(),
+                  disabled: busy || restarting,
+                  title: captchaReason ?? '以 --remote-debugging-port 重启宿主',
+                },
+                restarting ? '重启中…' : '以调试模式重启',
+              ),
+          h(
+            'button',
+            { className: 'zsp-btn', onClick: () => setOpen((prev) => !prev), disabled: busy },
+            open ? '收起' : '查看可领取',
+          ),
+        ),
+        state.__restart !== undefined ? h('span', { className: 'zsp-muted' }, state.__restart) : null,
+        open
+          ? accounts.map((account) => {
+              const slot = state[account.id] ?? {}
+              const plans = slot.plans ?? []
+              return h(
+                'div',
+                { key: account.id, className: 'zsp-row', style: { alignItems: 'flex-start' } },
+                h('span', { className: 'zsp-muted', style: { minWidth: '96px' } }, `#${account.index} ${account.nickname}`),
+                h(
+                  'div',
+                  { className: 'zsp-meter', style: { flex: '1 1 auto' } },
+                  slot.loading === true
+                    ? h('span', { className: 'zsp-muted' }, '查询中…')
+                    : slot.error !== undefined
+                      ? h('span', { className: 'zsp-error' }, slot.error)
+                      : slot.results !== undefined
+                        ? h(
+                            'span',
+                            { className: 'zsp-muted' },
+                            slot.results.length === 0
+                              ? (slot.message ?? '没有可领取的活动')
+                              : slot.results
+                                  .map((item) =>
+                                    `${item.ok ? '✓' : '✗'} ${item.name ?? item.planId}` +
+                                    `${item.alreadyClaimed === true ? '（已领过）' : ''}` +
+                                    `${item.ok === true ? '' : ` ${item.error ?? ''}`}`,
+                                  )
+                                  .join('；'),
+                          )
+                        : plans.length === 0
+                          ? h('span', { className: 'zsp-muted' }, '暂无可领取的活动')
+                          : h(
+                              'span',
+                              { className: 'zsp-muted' },
+                              plans.map((plan) => `${plan.name ?? plan.planId}（优先级 ${plan.priority ?? 0}）`).join('、'),
+                            ),
+                ),
+                h(
+                  'div',
+                  { className: 'zsp-actions', style: { marginTop: 0 } },
+                  plans.length > 0 && slot.results === undefined
+                    ? h(
+                        'button',
+                        { className: 'zsp-btn', onClick: () => void claim(account.id), disabled: busy || slot.loading === true },
+                        `领取 ${plans.length > 1 ? `全部 ${plans.length} 个` : ''}`,
+                      )
+                    : null,
+                  h(
+                    'button',
+                    { className: 'zsp-btn', onClick: () => void inspect(account.id), disabled: busy || slot.loading === true },
+                    plans.length > 0 || slot.results !== undefined ? '重新查询' : '查询',
+                  ),
+                ),
+              )
+            })
+          : null,
+      )
+    }
+
+    /**
      * 单个账号卡片：状态点、可编辑昵称、渠道、限流 chips、余额条、操作按钮。
      * 按钮只有两个：「使用」（置顶，下次请求即用它）与「删除」。
      */
@@ -222,14 +494,6 @@ window.__ModuleLoader__.load({
       const limited = Object.entries(account.modelRateLimits ?? {})
         .map(([model, resetAt]) => ({ model, resetAt }))
         .filter((item) => Number(item.resetAt) > Date.now())
-      const percent =
-        balance !== undefined &&
-        balance.ok === true &&
-        balance.enterprise !== true &&
-        typeof balance.total === 'number' &&
-        balance.total > 0
-          ? Math.max(0, Math.min(100, Math.round(((balance.remaining ?? 0) / balance.total) * 100)))
-          : undefined
       return h(
         'div',
         { className: 'zsp-card', 'data-next': isNext === true, 'data-hidden': modelListVisible === false },
@@ -269,11 +533,32 @@ window.__ModuleLoader__.load({
               : h(
                   React.Fragment,
                   null,
-                  h('div', { className: 'zsp-bar' }, h('span', { style: { width: `${percent ?? 0}%` } })),
-                  h(
-                    'span',
-                    { className: 'zsp-muted' },
-                    `剩余 ${balance.remaining}/${balance.total}${balance.planName ? ` · ${balance.planName}` : ''}`,
+                  /**
+                   * 已生效额度一条、每个未生效的领取包各一条——形状完全相同，
+                   * 未生效的用条纹 + 底部「X 起可用」区分。
+                   */
+                  h(QuotaMeter, {
+                    remaining: balance.remaining,
+                    total: balance.total,
+                    planName: balance.planName,
+                    expiresAt: balance.expiresAt,
+                  }),
+                  (balance.pending ?? []).map((item, index) =>
+                    h(
+                      React.Fragment,
+                      { key: `${item.planId ?? 'plan'}-${index}` },
+                      h(QuotaMeter, {
+                        pending: true,
+                        effectiveAt: item.effectiveAt,
+                        expiresAt: item.expiresAt,
+                        planName: item.showName,
+                      }),
+                      h(
+                        'span',
+                        { className: 'zsp-muted', style: { fontSize: '11px' } },
+                        `${item.showName ?? '额度'} ${formatPendingUnits(item)} tokens`,
+                      ),
+                    ),
                   ),
                 )
             : h('span', { className: 'zsp-error' }, balance.error ?? '余额查询失败'),
@@ -693,6 +978,7 @@ window.__ModuleLoader__.load({
               )
             : null,
         ),
+        h(ClaimSection, { accounts, busy, onClaimed: () => load(), captcha: data?.captcha }),
         data !== undefined && data.storeInMemory === true
           ? h(
               'span',

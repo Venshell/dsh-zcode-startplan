@@ -9,7 +9,8 @@
 param(
     [int]$WaitSeconds = 25,
     [int]$DebugPort = 9229,
-    [string]$Exe = 'D:\software\dsh\DeepSeek Harness.exe',
+    # 留空 = 自动定位宿主可执行文件（见下方 Resolve-ExePath）。
+    [string]$Exe = '',
     [string]$Log = "$env:TEMP\dsh-restart.log"
 )
 
@@ -18,11 +19,50 @@ function Write-Log([string]$Message) {
     Add-Content -Path $Log -Value $line -Encoding utf8
 }
 
+<#
+    自动定位宿主 exe。
+
+    ⚠ 不能用「当前进程 = powershell 的父进程」推：本脚本是**分离启动**的，
+    父进程链已经断了。按下面的次序找，第一个命中即用：
+
+    1. 显式 -Exe（调用方知道确切路径时最可靠）；
+    2. 正在运行的 `DeepSeek Harness.exe` 主进程的 ExecutablePath
+       （最准确：就是用户现在跑的那一份）；
+    3. 常见安装位置。
+#>
+function Resolve-ExePath([string]$Explicit) {
+    if ($Explicit -and (Test-Path $Explicit)) { return (Resolve-Path $Explicit).Path }
+
+    $main = Get-CimInstance Win32_Process -Filter "Name='DeepSeek Harness.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -notmatch '--type=' } |
+        Select-Object -First 1
+    if ($main -and $main.ExecutablePath -and (Test-Path $main.ExecutablePath)) {
+        return $main.ExecutablePath
+    }
+
+    foreach ($candidate in @(
+        'D:\software\dsh\DeepSeek Harness.exe',
+        (Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness\DeepSeek Harness.exe'),
+        (Join-Path ${env:ProgramFiles} 'DeepSeek Harness\DeepSeek Harness.exe')
+    )) {
+        if ($candidate -and (Test-Path $candidate)) { return $candidate }
+    }
+    return ''
+}
+
 try {
     Write-Log "restart scheduled in ${WaitSeconds}s (debug port $DebugPort)"
 
     # 等这一轮 agent 回复写完，避免把正在进行的会话截断在半句上。
     Start-Sleep -Seconds $WaitSeconds
+
+    # ⚠ 必须在**杀进程之前**解析 exe：进程一没，ExecutablePath 就查不到了。
+    $Exe = Resolve-ExePath $Exe
+    if (-not $Exe) {
+        Write-Log 'fatal: 找不到 DeepSeek Harness.exe（请用 -Exe 显式指定）'
+        exit 1
+    }
+    Write-Log "using exe: $Exe"
 
     $main = Get-CimInstance Win32_Process -Filter "Name='DeepSeek Harness.exe'" |
         Where-Object { $_.CommandLine -notmatch '--type=' }

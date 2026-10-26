@@ -6,7 +6,11 @@ import {
   OFFICIAL_STABLE_SECTIONS,
   buildUpstreamBody,
   buildZcodeSystemBlocks,
+  convertContent,
   convertTools,
+  imageBlockFromAttachment,
+  imageOccurrences,
+  resolveImages,
   withContextPrefix,
 } from '../lib/anthropic-body.js'
 
@@ -158,4 +162,144 @@ test('buildUpstreamBody: 不支持图片的模型收到占位文本', () => {
   const blocks = body.messages[0].content
   assert.equal(blocks.some((block) => block.type === 'image'), false)
   assert.match(blocks.map((block) => block.text).join('|'), /image omitted/)
+})
+
+// ---------------------------------------------------------------------------
+// 图片输入：宿主 ImageBlock（持久引用）→ 附件服务字节 → Anthropic base64 块。
+// 宿主契约：`dsh-llm` 的 ImageBlock 是 `{ type:'image', attachment: ref }`，
+// ref = `{ attachmentId:'sha256:<hex>', mediaType, width, height, bytes, name? }`
+// （attachment-local 实测）。此前 convertContent 只认 base64 形态，
+// 引用块被静默丢弃 —— 用户发图但上游什么都没收到。
+// ---------------------------------------------------------------------------
+
+const PNG_REF = {
+  attachmentId: 'sha256:abcd1234ef567890',
+  mediaType: 'image/png',
+  width: 64,
+  height: 32,
+  bytes: 100,
+}
+
+const FAKE_BYTES = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])
+
+test('imageOccurrences: 识别宿主持久引用与内联 base64 两种形态', () => {
+  const blocks = [
+    { type: 'text', text: 'see' },
+    { type: 'image', attachment: PNG_REF },
+    { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'QQ==' } },
+    { type: 'file', attachment: { attachmentId: 'sha256:file' } },
+  ]
+  const found = imageOccurrences(blocks)
+  assert.equal(found.length, 2)
+  assert.equal(found[0].attachmentId, PNG_REF.attachmentId)
+  assert.deepEqual(found[0].ref, PNG_REF)
+  assert.equal(found[1].attachmentId, 'inline:2')
+  assert.equal(found[1].inline.mediaType, 'image/jpeg')
+})
+
+test('imageBlockFromAttachment: 字节编码为 Anthropic base64 块', () => {
+  const block = imageBlockFromAttachment(PNG_REF, FAKE_BYTES)
+  assert.equal(block.type, 'image')
+  assert.equal(block.source.type, 'base64')
+  assert.equal(block.source.media_type, 'image/png')
+  assert.equal(Buffer.from(block.source.data, 'base64').compare(Buffer.from(FAKE_BYTES)), 0)
+})
+
+test('convertContent: 持久引用 + 已解析字节 → base64 image 块', () => {
+  const blocks = convertContent(
+    [
+      { type: 'text', text: 'look' },
+      { type: 'image', attachment: PNG_REF },
+    ],
+    { resolvedImages: new Map([[PNG_REF.attachmentId, { data: FAKE_BYTES, ref: PNG_REF }]]) },
+  )
+  assert.equal(blocks[0].type, 'text')
+  assert.equal(blocks[1].type, 'image')
+  assert.equal(blocks[1].source.type, 'base64')
+  assert.equal(blocks[1].source.media_type, 'image/png')
+})
+
+test('convertContent: 引用解析失败 → 占位文本（不再静默丢弃）', () => {
+  const blocks = convertContent([{ type: 'image', attachment: PNG_REF }], { resolvedImages: new Map() })
+  assert.equal(blocks.length, 1)
+  assert.equal(blocks[0].type, 'text')
+  assert.match(blocks[0].text, /image omitted/)
+})
+
+test('resolveImages: 经附件服务 readImageRequest 解析引用字节', async () => {
+  const calls = []
+  const attachments = {
+    async readImageRequest(ref, target, signal) {
+      calls.push({ ref, target, signal })
+      return { attachment: ref, data: FAKE_BYTES, mediaType: 'image/png', width: 64, height: 32, bytes: 8 }
+    },
+  }
+  const resolved = await resolveImages(
+    [
+      {
+        role: 'user',
+        content: [{ type: 'text', text: 'hi' }, { type: 'image', attachment: PNG_REF }],
+      },
+    ],
+    { resolveAttachments: () => attachments },
+  )
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].ref.attachmentId, PNG_REF.attachmentId)
+  assert.equal(calls[0].target.width, 64)
+  assert.equal(calls[0].target.height, 32)
+  assert.equal(resolved.get(PNG_REF.attachmentId).data, FAKE_BYTES)
+})
+
+test('resolveImages: 附件服务缺席 → 空 Map（图片降级占位）', async () => {
+  const resolved = await resolveImages([{ role: 'user', content: [{ type: 'image', attachment: PNG_REF }] }], {})
+  assert.equal(resolved.size, 0)
+})
+
+test('resolveImages: 单张解析失败不影响其余图片', async () => {
+  const badRef = { ...PNG_REF, attachmentId: 'sha256:badbadbadbadbad' }
+  const attachments = {
+    async readImageRequest(ref) {
+      if (ref.attachmentId === badRef.attachmentId) throw new Error('boom')
+      return { attachment: ref, data: FAKE_BYTES }
+    },
+  }
+  const resolved = await resolveImages(
+    [
+      {
+        role: 'user',
+        content: [{ type: 'image', attachment: PNG_REF }, { type: 'image', attachment: badRef }],
+      },
+    ],
+    { resolveAttachments: () => attachments },
+  )
+  assert.equal(resolved.size, 1)
+  assert.ok(resolved.has(PNG_REF.attachmentId))
+  assert.ok(!resolved.has(badRef.attachmentId))
+})
+
+test('buildUpstreamBody: 宿主引用图片端到端进入上游请求体', () => {
+  const body = buildUpstreamBody({
+    options: {
+      model: 'GLM-5.3-Flash',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: '这张图里有什么？' },
+            { type: 'image', attachment: PNG_REF },
+          ],
+        },
+      ],
+    },
+    supportsImages: true,
+    resolvedImages: new Map([[PNG_REF.attachmentId, { data: FAKE_BYTES, ref: PNG_REF }]]),
+  })
+  const content = body.messages[0].content
+  assert.deepEqual(
+    content.map((block) => block.type),
+    ['text', 'text', 'image'],
+    '图片必须以 image 块进入上游请求（此前被静默丢弃）；首位是日期块',
+  )
+  assert.equal(content[2].source.type, 'base64')
+  assert.equal(content[2].source.media_type, 'image/png')
 })

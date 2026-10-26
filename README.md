@@ -8,6 +8,10 @@
   （`ZCode Start Plan · 主号`），栏内模型固定消耗该账号额度（不自动换号），
   多会话各吃各的；「统一选号」栏位可在面板一键隐藏/恢复
 - 双渠道登录：`bigmodel`（智谱开放平台）/ `zai`（Z.AI），插件详情页内直接发起设备授权
+- **额度可视到到期时间**：剩余 / 计划名 / 到期（绝对时间 + 相对时长）；
+  未生效的领取包用条纹条显示「X 起可用 · Y 到期」
+- **面板内领取赠送额度**：可领列表 + 一键领取（captcha 一次性、`1003` 幂等）；
+  captcha 不可用时给「以调试模式重启」按钮，不用手抄 param
 - Web UI 管理面板：挂在官方插件详情页的 `plugins.bundle.config` 座位，零依赖手写组件
 - 零运行时依赖：协议层移植自 [bonus-plan-4-open-zcode](https://gitee.com/iJetLi/bonus-plan-4-open-zcode)，
   但形态不同——它做的是 ZCode 插件（本地代理），这里直接实现 **`ctx.llm` 适配器**，
@@ -126,8 +130,33 @@ node bin/cli.mjs import .\zcode-jwt.txt --name <备注>
   （卡片栏距卡片边框 26px，统一行补 13px 内边距拉齐）；tooltip 由动态文案改为
   固定 `aria-label`「在模型列表中显示这一栏」，读屏/键盘行为一致
 - **刷新**：一个按钮搞定（列表+余额一次并行拉全）
+- **额度条**：已生效与未生效**同形状**，一句话同时给出剩余、计划名与**到期时间**
+  （绝对时间 + 相对时长，如 `剩余 4298278/8000000 · GLM-5.3 · 23:59 到期（1 小时 20 分后）`）；
+  未生效的领取包用**条纹 + 半透明**并写 `23:00 起可用 · 10/27 09:00 到期`，
+  不会被误看成「现在就能用的满格」
+- **赠送额度领取**：底部「赠送额度」区，按需展开（点「查看可领取」才打上游，
+  避免常驻轮询）。每账号一行可领取列表 + 「领取」按钮；captcha 不可用时
+  就地给出「以调试模式重启」
 - 安全：面板与宿主之间走同源 fetch + loopback 路由，凭据永不出网关；
   登录授权的 `flowSecret` 只留在宿主内存
+
+### 赠送额度（领取）
+
+`GET /api/zcode-start-plan/claimable?id=` → 先补活跃上报（不补则 `preview` 恒空），
+再查可领列表；`POST /api/zcode-start-plan/claim {id, planId?}` → 逐 plan 领取。
+三条来自上游实测的硬约束：
+
+| 约束 | 违反后果 | 实现 |
+|---|---|---|
+| captcha **一次性** | 复用同一个 param 必得 `3007` | 每个 plan 循环内重新 mint |
+| `1003` = 已领过 | 报红让用户以为失败 | 视为**幂等成功**（标 `alreadyClaimed`） |
+| mint 失败不能重试 | 连环重试烧设备信誉（有冷却惩罚） | 立刻停，且**根本不发 claim 请求** |
+
+⚠ captcha 复用 `ZcodePlanClient.mintCaptcha`（同一份串行队列）而不是另起一个 minter：
+产出是**设备级**的，面板点击与推理链路同时要会互相踩 CDP 页面。
+
+**未生效的额度**在 `billing/balance` 的 `plans[].entitlements[]` 里（带 `effective_at`），
+**不在** `balances[]` —— 只看后者会把「23 点才生效的包」显示成 `0/0`，看起来像领取失败。
 
 ## 在 DSH 里使用
 
@@ -142,15 +171,28 @@ node bin/cli.mjs import .\zcode-jwt.txt --name <备注>
 
 ### captcha 需要宿主 Electron 的调试端口
 
+> **先澄清一个高频误解**：这个调试端口**日常调用模型不需要**。
+> captcha 在推理链路里是**按需触发**的 —— 只有被上游 `3007` 拒过、且在该
+> 账号×模型的 2 分钟记忆窗口内，才会去产出一次。实测 `captcha.reachable=false`
+> 且 `captchaRequiredAccounts=0` 时，对话完全正常。
+> **只有「领取赠送额度」是硬性要求**（claim 接口强制带 captcha 头，每个 plan 一个）。
+
 captcha 是阿里云**网页 SDK**，必须在真实 https origin 里跑。插件通过 CDP 在宿主
 renderer 里挂一个**离屏隐藏 iframe**（`opacity:0`、`pointer-events:none`、只增删自己的
 元素、用完即移除），不碰界面。
 
-打包态默认**不开**调试端口，需要带参数启动一次：
+打包态默认**不开**调试端口。三种开启方式，任选其一：
 
-```powershell
-& "D:\software\dsh\DeepSeek Harness.exe" --remote-debugging-port=9229
-```
+1. **面板按钮（最省事）**：插件详情页的「赠送额度」区，captcha 不可用时会直接出现
+   **「以调试模式重启」**，点一下 → 宿主带参数自动重开；脚本带失败回退
+   （CDP 起不来就不带参数重启，保证宿主仍可用）；
+2. 手动启动一次：
+
+   ```powershell
+   & "D:\software\dsh\DeepSeek Harness.exe" --remote-debugging-port=9229
+   ```
+
+3. CLI：`node bin/cli.mjs claim --port 9229`（同样要那个端口）。
 
 （端口不同就改 `cordis.patch.yml` 的 `captcha.debugPort`，或设
 `ZCODE_START_PLAN_CDP_PORT`。）
@@ -354,6 +396,25 @@ case "block-end":       partial.block = chunk.block
 - 面板挂 `plugins.bundle.config` 座位：宿主**按包名 key 派发**（`key` 必须与
   安装的包名一字不差），列表页则以 `view === 'summary'` 请求一行简介
 
+### 账号面板路由：`webServer` 只能用**可选注入**
+
+`/api/zcode-start-plan/*` 这些路由要挂到宿主的 `webServer` 服务上，而它是**可选**服务：
+
+```js
+// ✅ index.js：服务出现才回调，消失则回调里的 effect 自动撤销
+ctx.inject(['webServer'], (webCtx) => assembled.registerManageRoutes(webCtx))
+```
+
+| 错误写法 | 症状 |
+|---|---|
+| `export const inject = [..., 'webServer']` | headless profile 无该服务 → **整个插件 fiber 挂起**，模型全没了 |
+| 从 facade 探测 `ctx.webServer` | 宿主只挂**声明过的**服务 → 永远 `undefined` → 路由静默不注册，**面板永远 404** |
+
+⚠ 宿主的 `/api` 是 **prefix 路由**且带认证：路由没注册时，请求会被认证层接走
+（浏览器有 cookie 时返回 `not found` 404，无 cookie 时 401 `unauthorized`），
+看起来像「端点不对」或「认证问题」。排障先看日志里有没有
+`管理路由已注册：12 条（/api/zcode-start-plan/*）`；没有就是没挂上。
+
 ## 已知边界
 
 - **闭源 ZCode 与本插件同时用同一账号**会双倍消耗验证配额 —— 建议一处用
@@ -368,7 +429,7 @@ case "block-end":       partial.block = chunk.block
 ## 开发
 
 ```powershell
-node scripts/run-tests.mjs      # 93 个用例，单进程跑（沙箱里 spawn 会被拒）
+node scripts/run-tests.mjs      # 132 个用例，单进程跑（沙箱里 spawn 会被拒）
 node scripts/smoke-install.mjs  # 对**已安装**的插件跑真实接线（26 项）
 node scripts/verify_compat.mjs  # 兼容性门禁（peerDependencies 不会被判不兼容）
 node bin/cli.mjs help           # CLI 一览
@@ -377,7 +438,12 @@ node bin/cli.mjs help           # CLI 一览
 测试覆盖：上游请求头与错误分类、身份块/日期块/工具断点、SSE 解码（含跨 chunk 与
 EOF flush）、**宿主 `BlockAssembler` 契约级复刻**、Anthropic→DSH 流翻译
 （text/tool_use/thinking/error）、切号策略、账号池、登录渠道归一、Config 校验、
-端到端 `adapter.stream()` 与 `apply()` 接线。
+端到端 `adapter.stream()` 与 `apply()` 接线、**面板组件的结构级渲染**
+（含 hook 顺序闸门）、**领取路由**（captcha 一次性 / `1003` 幂等 / 失败即停）、
+**到期时间解析**（秒→毫秒、只汇总还有余额的桶）。
+
+⚠ 面板是浏览器 bundle，只能做**结构级**断言（`tests/client-panel.test.mjs`
+用最小 `createElement` 桩真渲染组件树）；纯视觉问题（布局、配色）仍需人眼确认。
 
 ## 文件地图
 
@@ -398,6 +464,7 @@ EOF flush）、**宿主 `BlockAssembler` 契约级复刻**、Anthropic→DSH 流
 | `lib/pool.js` | SQLite 账号库 + 账号池 |
 | `lib/local-endpoint.js` | 可选本地 Anthropic 端点（pi-ai 回落路线） |
 | `bin/cli.mjs` | login / list / status / probe / claim / captcha |
+| `scripts/restart-dsh.ps1` | 以 `--remote-debugging-port` 重启宿主（面板按钮的后端；带失败回退） |
 
 ## 许可
 
