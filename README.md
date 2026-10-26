@@ -13,8 +13,9 @@
 - **面板内领取赠送额度**：可领列表 + 一键领取（captcha 一次性、`1003` 幂等）；
   captcha 不可用时给「以调试模式重启」按钮，不用手抄 param
 - Web UI 管理面板：挂在官方插件详情页的 `plugins.bundle.config` 座位，零依赖手写组件
-- 零运行时依赖：协议层移植自 [bonus-plan-4-open-zcode](https://gitee.com/iJetLi/bonus-plan-4-open-zcode)，
-  但形态不同——它做的是 ZCode 插件（本地代理），这里直接实现 **`ctx.llm` 适配器**，
+- 零运行时依赖：协议事实（端点/错误码/captcha 时序）参考 [bonus-plan-4-open-zcode](https://gitee.com/iJetLi/bonus-plan-4-open-zcode)，
+  身份块文本取自开源 [ZCode](https://github.com/zai-org/ZCode)（Apache-2.0，逐字出处见「许可」节）。
+  形态不同——它做的是 ZCode 插件（本地代理），这里直接实现 **`ctx.llm` 适配器**，
   选号、captcha、切号、重试全在 DSH 进程内完成
 
 [![dsh.so risk](https://www.dsh.so/badge/dsh-zcode-startplan.svg)](https://www.dsh.so/artifact/dsh-zcode-startplan/)
@@ -469,4 +470,17 @@ EOF flush）、**宿主 `BlockAssembler` 契约级复刻**、Anthropic→DSH 流
 ## 许可
 
 GPL-3.0-or-later，见 [LICENSE](LICENSE)。上游服务条款与账号策略以服务提供方为准。
-协议实现参考并移植自 [bonus-plan-4-open-zcode](https://gitee.com/iJetLi/bonus-plan-4-open-zcode)。
+
+### 出处与许可证（按参考内容分类）
+
+| 参考对象 | 参考了什么 | 许可证 | 对我们的约束 |
+|---|---|---|---|
+| [zai-org/ZCode](https://github.com/zai-org/ZCode) | **身份块文本**（`OFFICIAL_CLI_PREFIX` / `OFFICIAL_STABLE_SECTIONS`），取自 `apps/zcode-cli/packages/core/src/context/sections/identity.ts`，逐字未改 | **Apache-2.0** | 保留版权声明（本表即声明）；Apache-2.0 可并入 GPLv3（FSF 确认单向兼容） |
+| [bonus-plan-4-open-zcode](https://gitee.com/iJetLi/bonus-plan-4-open-zcode) | 协议**事实**：端点、错误码语义、captcha 时序、领取前置条件 | **无**（gitee API `license: null`） | 事实不受版权保护；实现为独立编写并附独立测试 |
+| [@linxin666/dsh-client-ui-plugin-manager](https://www.npmjs.com/package/@linxin666/dsh-client-ui-plugin-manager) | 管理路由的**宿主契约**（route 形状、loopback 栅栏思路） | npm 包 | 接口契约适配，无代码复制 |
+| [@venshell/dsh-workbuddy-connect](https://www.npmjs.com/package/@venshell/dsh-workbuddy-connect) | 每账号一个模型栏位的宿主侧写法 | 本插件作者自己的包 | 无 |
+| [MYCF711/dsh-free-glm](https://github.com/MYCF711/dsh-free-glm) | **无**（同源兄弟项目：双方参考同一个 bonus-plan、独立验证出「官方身份块是 3012 判据」这同一结论，但代码零往来） | README 自述 MIT，仓库无 LICENSE 文件 | 不适用（无代码往来） |
+
+> 历史注记：身份块文本最初经由 bonus-plan-4-open-zcode / a137460387/zcode2api
+> 从官方闭源 bundle 反解获得；开源 ZCode 公开后确认该文本在
+> `identity.ts` 中逐字存在，出处升级为上述 Apache-2.0 仓库。

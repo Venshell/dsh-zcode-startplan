@@ -3,6 +3,44 @@
 本文件记录**每次修复背后的宿主契约**。只看 diff 看不出「为什么不能改回去」，
 所以把约束与症状一起写下来。
 
+## 0.5.3 — 出处声明：身份块文本的源头是 Apache-2.0 的开源 ZCode
+
+### 为什么补这条
+
+`lib/anthropic-body.js` 的身份块（`OFFICIAL_CLI_PREFIX` / `OFFICIAL_STABLE_SECTIONS`）
+此前声明"移植自 bonus-plan-4-open-zcode"，而那个仓库**无许可证**——审计时说不清
+这段逐字文本的版权归属。
+
+### 核实结果
+
+身份块文本与开源仓库 [zai-org/ZCode](https://github.com/zai-org/ZCode)（**Apache-2.0**，
+8.3k stars，官方描述 "Z.ai's coding agent harness"）的
+`apps/zcode-cli/packages/core/src/context/sections/identity.ts` **逐字一致**：
+
+- `OFFICIAL_CLI_PREFIX` ≈ `buildIdentityPrompt()` 的 intro（"You are ZCode, an interactive coding agent"）
+- stable 段的 SECURITY_NOTICE ≈ 同文件 `SECURITY_NOTICE` 常量（逐字符，含 em-dash）
+- `# Harness` 块 ≈ 同文件 `buildHarnessBlock()`（连 `\u2014` 转义都对得上）
+
+历史上经 bonus-plan / a137460387/zcode2api 从官方闭源 bundle 反解（当时开源仓库
+尚未放出或未被注意到）；现在源头公开，出处升级为 Apache-2.0 仓库。
+
+### 合规含义
+
+- Apache-2.0 → GPL-3.0-or-later：FSF 确认单向兼容，无需换许可证；
+- 唯一义务是保留版权与许可声明 —— 已在 README「许可」节建立**五级出处表**
+  （zai-org/ZCode / bonus-plan / plugin-manager / workbuddy / dsh-free-glm），
+  逐项写明参考了什么、许可证状态、对我们的约束；
+- `lib/anthropic-body.js` 的常量头部补了同样的出处注释。
+
+### 与 dsh-free-glm 的关系（审计时被问过）
+
+同源兄弟项目（双方参考同一个 bonus-plan），**代码零往来**：它走"ZCode 壳内桥接"
+（部署开源 ZCode 实例 + HTTP 桥），本插件走"进程内直连"。它的 README 自述 MIT
+但仓库无 LICENSE 文件 —— 与我们无关，因为我们没有从它那里复制任何内容。
+它声称"裸 HTTP 直连必 3012、走会话链路是唯一解"，与本插件直连成功的事实矛盾；
+合理解释是时间差（其实验集中于 2026-09-28 前后）与设备身份策略差异（它复用壳的
+真实 X-Device-Mid，本插件生成独立 mid + 官方身份块）。双方结论不宜互相套用。
+
 ## 0.5.2 — 额度到期时间（绝对时间 + 相对时长）
 
 ### 需求
