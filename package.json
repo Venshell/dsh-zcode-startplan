@@ -36,6 +36,7 @@
     "lib",
     "bin",
     "scripts",
+    "tests",
     "locale/*.json",
     "icon.svg",
     "cordis.patch.yml",
