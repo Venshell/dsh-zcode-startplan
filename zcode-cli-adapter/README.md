@@ -15,7 +15,7 @@ ZCode CLI（自定义供应商，kind: anthropic）
    ▼
 server.mjs（本目录，独立进程，无需 DSH 在跑）
    ├─ /v1/messages ─► ZcodePlanClient：选号 → 身份块/日期块 → 按需 captcha
-   │                  → 直发上游 → 3009 退避 / 1005·1113·零内容切号 → SSE 透传
+   │                  → 直发上游 → 3009 忙标记+退避 / 1005·1113·零内容切号 → SSE 透传
    ├─ /v1/models、/health
    └─ captcha ──────► 宿主 Electron 的离屏 iframe（CDP 9229，按需才产出）
    ▼
@@ -76,7 +76,7 @@ node zcode-cli-adapter\register-provider.mjs
 - `system` 必须以官方身份块开头、首轮 user 消息带 `<system-reminder>` 日期块，
   否则 `3012`（**有账号冷却惩罚**）—— `plan-client.js` 已逐字复刻，别动。
 - captcha「要了才取」：先不带，被 `3007` 拒才产出（需要宿主 Electron 开着调试端口）。
-- `3012` 绝不重试；`3009` 退避重试不换号；`1005`/`1113`/零内容 → 标号换号。
+- `3012` 绝不重试；`3009` 打 60s 忙标记 + 退避重试，穷尽后换号（忙标记让并行请求绕开忙账号）；`1005`/`1113`/零内容 → 标号换号。
 - 同一账号别在 ZCode CLI 原生通道与本端点**同时**用 —— 双倍消耗同一份额度。
 
 ## 已验证（2026-10-25 冒烟）

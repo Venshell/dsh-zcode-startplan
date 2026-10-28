@@ -5,11 +5,14 @@ import { ZcodePlanClient } from '../lib/plan-client.js'
 
 const CREDENTIAL = { zcode_jwt: 'jwt-1', device_mid: 'dev-1', user_id: 'u-1' }
 
-/** 内存版账号池（只实现 plan-client 用到的三个方法）。 */
+/** 内存版账号池（只实现 plan-client 用到的方法）。 */
 function fakePool(credentials = [{ id: 'acct-a', credential: CREDENTIAL }]) {
   const state = credentials.map((entry) => ({ nickname: entry.id, enabled: true, model_rate_limits: {}, ...entry }))
   return {
     list: () => state,
+    get(id) {
+      return state.find((entry) => entry.id === id)
+    },
     pick(model, exclude) {
       const excluded = exclude ?? new Set()
       const hit = state.find((entry) => entry.enabled && !excluded.has(entry.id))
@@ -184,6 +187,7 @@ test('并发限流 3009 退避重试但不换号', async () => {
   const client = new ZcodePlanClient({
     pool: fakePool(),
     minter: fakeMinter(),
+    concurrencyRetryBaseMs: 1,
     fetchImpl: async () => {
       calls += 1
       return calls === 1 ? response(429, '{"code":3009}', 'application/json') : response(200, textStream())
@@ -192,6 +196,154 @@ test('并发限流 3009 退避重试但不换号', async () => {
   const result = await client.call({ options: baseOptions })
   assert.equal(calls, 2)
   assert.equal(result.accountId, 'acct-a')
+})
+
+test('3009 打忙标记：并行请求直接路由到空闲账号', async () => {
+  const pool = fakePool([
+    { id: 'acct-a', credential: CREDENTIAL },
+    { id: 'acct-b', credential: { ...CREDENTIAL, user_id: 'u-2' } },
+  ])
+  /** 固定时钟：忙标记 60s 窗口内第二个请求必须绕开 acct-a。 */
+  let now = Date.now()
+  const markBusy = []
+  let clearBusy = 0
+  const realPool = new Map()
+  for (const entry of pool.list()) realPool.set(entry.id, entry)
+  const busy = new Map()
+  pool.markModelBusy = (accountId, modelId) => {
+    markBusy.push(`${accountId}|${modelId}`)
+    busy.set(`${accountId}|${modelId}`, now + 60_000)
+  }
+  pool.isModelBusy = (accountId, modelId) => (busy.get(`${accountId}|${modelId}`) ?? 0) > now
+  pool.clearModelBusy = (accountId, modelId) => {
+    const key = `${accountId}|${modelId}`
+    if (busy.has(key)) {
+      busy.delete(key)
+      clearBusy += 1
+    }
+  }
+  pool.pick = (model, exclude) => {
+    const excluded = exclude ?? new Set()
+    const byModel = (entry) => entry.enabled && !excluded.has(entry.id)
+    let hit = [...realPool.values()].find((entry) => byModel(entry) && !pool.isModelBusy(entry.id, model))
+    if (hit === undefined) hit = [...realPool.values()].find((entry) => byModel(entry))
+    return hit === undefined ? null : { entry: hit, credential: hit.credential }
+  }
+
+  /** 请求 1：acct-a 撞 3009，退避穷尽（上限 2 次）后换到 acct-b 成功。 */
+  let calls = 0
+  const client = new ZcodePlanClient({
+    pool,
+    minter: fakeMinter(),
+    concurrencyRetryBaseMs: 1,
+    now: () => now,
+    fetchImpl: async () => {
+      calls += 1
+      return calls <= 3 ? response(429, '{"code":3009}', 'application/json') : response(200, textStream())
+    },
+  })
+  const first = await client.call({ options: baseOptions })
+  assert.equal(first.accountId, 'acct-b', '退避穷尽后换号到 acct-b')
+  assert.deepEqual(
+    [...new Set(markBusy)],
+    ['acct-a|GLM-5.3-Flash'],
+    '3009 命中即打忙标记（每次尝试都刷新，key 集合不变）',
+  )
+  assert.equal(calls, 4)
+
+  /** 请求 2（同一 60s 窗口内）：选号第一档就跳过忙的 acct-a，直接用 acct-b。 */
+  let secondCalls = 0
+  const client2 = new ZcodePlanClient({
+    pool,
+    minter: fakeMinter(),
+    concurrencyRetryBaseMs: 1,
+    now: () => now,
+    fetchImpl: async () => {
+      secondCalls += 1
+      return response(200, textStream())
+    },
+  })
+  const second = await client2.call({ options: baseOptions })
+  assert.equal(second.accountId, 'acct-b', '忙标记让并行请求直接路由到空闲账号')
+  assert.equal(secondCalls, 1, '不再先撞忙账号')
+  assert.equal(clearBusy, 0)
+})
+
+test('3009 换号后全部忙尽 → RATE_LIMIT（而非 QUOTA），提示稍后重试', async () => {
+  const pool = fakePool([
+    { id: 'acct-a', credential: CREDENTIAL },
+    { id: 'acct-b', credential: { ...CREDENTIAL, user_id: 'u-2' } },
+  ])
+  const client = new ZcodePlanClient({
+    pool,
+    minter: fakeMinter(),
+    concurrencyRetryBaseMs: 1,
+    fetchImpl: async () => response(429, '{"code":3009,"msg":"model concurrency limit exceeded"}', 'application/json'),
+  })
+  await assert.rejects(
+    () => client.call({ options: baseOptions }),
+    (error) => {
+      assert.equal(error.code, 'RATE_LIMIT')
+      assert.match(error.message, /3009/)
+      assert.match(error.message, /稍后重试/)
+      return true
+    },
+  )
+  /** 3009 绝不能打成「额度用尽」标记（那会把账号冤枉到当日结束）。 */
+  assert.equal(
+    pool.list().every((entry) => Object.keys(entry.model_rate_limits).length === 0),
+    true,
+    '忙账号只打软标记，model_rate_limits 保持干净',
+  )
+})
+
+test('3009 成功命中后清忙标记，不再绕开该账号', async () => {
+  const pool = fakePool([{ id: 'acct-a', credential: CREDENTIAL }])
+  let busy = false
+  pool.markModelBusy = () => {
+    busy = true
+  }
+  pool.isModelBusy = () => busy
+  pool.clearModelBusy = () => {
+    busy = false
+  }
+  let calls = 0
+  const client = new ZcodePlanClient({
+    pool,
+    minter: fakeMinter(),
+    concurrencyRetryBaseMs: 1,
+    fetchImpl: async () => {
+      calls += 1
+      return calls === 1 ? response(429, '{"code":3009}', 'application/json') : response(200, textStream())
+    },
+  })
+  const result = await client.call({ options: baseOptions })
+  assert.equal(result.accountId, 'acct-a')
+  assert.equal(busy, false, '命中成功 = 账号已空闲，忙标记立即清除')
+})
+
+test('钉定账号持续 3009 → RATE_LIMIT 报错，绝不换号', async () => {
+  let calls = 0
+  const client = new ZcodePlanClient({
+    pool: fakePool(),
+    minter: fakeMinter(),
+    concurrencyRetryBaseMs: 1,
+    fetchImpl: async () => {
+      calls += 1
+      return response(429, '{"code":3009}', 'application/json')
+    },
+  })
+  await assert.rejects(
+    () => client.call({ options: { ...baseOptions, model: 'GLM-5.3-Flash@acct:acct-a' } }),
+    (error) => {
+      assert.equal(error.code, 'RATE_LIMIT')
+      assert.match(error.message, /钉定的账号/)
+      assert.match(error.message, /3009/)
+      return true
+    },
+  )
+  /** 1 次请求 = 退避上限 2 次重试 + 1 = 3 发，全打在钉定账号上，无第二发选号。 */
+  assert.equal(calls, 3, '钉定模式只打指定账号，绝不换号')
 })
 
 test('账号池为空 → QUOTA 并提示登录命令', async () => {

@@ -56,6 +56,62 @@ test('markModelRateLimited 只影响那一对「账号×模型」，且到期后
   assert.notEqual(pool.pick('GLM-5.3-Flash'), null)
 }))
 
+test('忙标记：pick 优先绕开忙账号；全部忙时回落排队', withPool(async (pool) => {
+  const a = pool.add(credential('a'), 'A').entry
+  const b = pool.add(credential('b'), 'B').entry
+
+  /** A 忙 → 统一选号直接路由到空闲的 B（修复的核心行为）。 */
+  pool.markModelBusy(a.id, 'GLM-5.3-Flash')
+  assert.equal(pool.pick('GLM-5.3-Flash').entry.id, b.id)
+  assert.equal(pool.pick('GLM-5.3-Flash').entry.id, b.id, '后续请求同样绕开 A')
+
+  /** B 也忙 → 回落到忙账号（软状态，排队好过报错）。 */
+  pool.markModelBusy(b.id, 'GLM-5.3-Flash')
+  assert.equal(pool.pick('GLM-5.3-Flash').entry.id, a.id)
+
+  /** exclude 过的账号不会被第二档「捞回来」。 */
+  const picked = pool.pick('GLM-5.3-Flash', new Set([a.id]))
+  assert.equal(picked.entry.id, b.id)
+  assert.equal(pool.pick('GLM-5.3-Flash', new Set([a.id, b.id])), null)
+
+  /** 忙标记是「账号×模型」粒度：另一个模型不受影响。 */
+  assert.equal(pool.pick('GLM-5.3').entry.id, a.id)
+}))
+
+test('忙标记：过期自动恢复、clearModelBusy 与 busyCount', withPool(async (pool) => {
+  const a = pool.add(credential('a'), 'A').entry
+  pool.add(credential('b'), 'B')
+  pool.markModelBusy(a.id, 'GLM-5.3-Flash', Date.now() + 50)
+  assert.equal(pool.isModelBusy(a.id, 'GLM-5.3-Flash'), true)
+  assert.equal(pool.busyCount(), 1)
+
+  /** 到期后恢复：不 busy 的账号重新排回第一优先。 */
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(pool.isModelBusy(a.id, 'GLM-5.3-Flash'), false)
+  assert.equal(pool.busyCount(), 0)
+  assert.equal(pool.pick('GLM-5.3-Flash').entry.id, a.id)
+
+  /** clearModelBusy 单模型 / 全账号两种粒度。 */
+  pool.markModelBusy(a.id, 'GLM-5.3-Flash')
+  pool.markModelBusy(a.id, 'GLM-5.3')
+  pool.clearModelBusy(a.id, 'GLM-5.3-Flash')
+  assert.equal(pool.isModelBusy(a.id, 'GLM-5.3-Flash'), false)
+  assert.equal(pool.isModelBusy(a.id, 'GLM-5.3'), true)
+  pool.clearModelBusy(a.id)
+  assert.equal(pool.isModelBusy(a.id, 'GLM-5.3'), false)
+}))
+
+test('忙标记不影响额度标记：限流中的账号不会被第二档捞回', withPool(async (pool) => {
+  const a = pool.add(credential('a'), 'A').entry
+  const b = pool.add(credential('b'), 'B').entry
+  pool.markModelRateLimited(a.id, 'GLM-5.3-Flash', Date.now() + 60_000)
+  pool.markModelBusy(b.id, 'GLM-5.3-Flash')
+  assert.equal(pool.pick('GLM-5.3-Flash').entry.id, b.id, 'A 额度尽是硬过滤；B 忙但第二档可回落')
+  pool.markModelBusy(a.id, 'GLM-5.3-Flash')
+  assert.equal(pool.pick('GLM-5.3-Flash').entry.id, b.id, 'A 忙也不影响 —— 它本来就因限流被硬过滤')
+  assert.equal(pool.pick('GLM-5.3-Flash', new Set([b.id])), null, 'B 被排除后无可选账号（A 限流硬过滤，绝不捞回）')
+}))
+
 test('停用的账号不参与选号；reorder 改变优先级', withPool(async (pool) => {
   const a = pool.add(credential('a'), 'A').entry
   pool.add(credential('b'), 'B')
