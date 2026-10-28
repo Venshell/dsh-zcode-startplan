@@ -352,7 +352,7 @@ test('ClaimSection: captcha 可用时不显示重启按钮', () => {
   )
   const buttons = findAll(tree, (node) => node.type === 'button').map(textOf)
   assert.ok(!buttons.includes('以调试模式重启'), '载体已就绪就不该再提示重启')
-  assert.match(textOf(tree), /captcha 载体已就绪/)
+  assert.match(textOf(tree), /探测/, '0.6.0 文案：探测自动填 plan_id')
 })
 
 /**
@@ -361,8 +361,10 @@ test('ClaimSection: captcha 可用时不显示重启按钮', () => {
  * 实证：官方客户端全天 0 次调用 `/billing/preview`，点击时直接调 claim。
  * 我们照抄了源码里存在但从未被使用的方法 → preview 恒空 → 按钮永不出现。
  *
- * 新形态：**输入框填 plan_id + 直接领取**，「有没有名额」由服务端裁决。
- * 本用例锁住这个形态，防止有人把它改回「查列表」。
+ * 新形态：**探测按钮自动填 plan_id + 直接领取**，「有没有名额」由服务端裁决。
+ * 0.6.0 起探测走官方 marketing/touch 发现端点（与 /billing/preview 无关），
+ * 「不 preview」的约束仍成立：没有任何路径再引用 /billing/preview。
+ * 本用例锁住这个形态，防止有人把它改回「查 preview 列表」。
  */
 test('ClaimSection: 展开后给输入框与领取按钮，不再依赖 preview 列表', () => {
   const panel = buildPanel()
@@ -380,15 +382,14 @@ test('ClaimSection: 展开后给输入框与领取按钮，不再依赖 preview 
   assert.doesNotMatch(text, /暂无可领取的活动/, '不该再显示"暂无可领取"')
   /** 新话术要在。 */
   assert.match(text, /plan_id/)
+  assert.match(text, /探测/, '0.6.0：探测按钮（marketing/touch 自动填 plan_id）')
 })
 
-test('ClaimSection 源码不再调用 /claimable（preview 通道）', () => {
+test('ClaimSection 源码：探测走 /claimable（marketing/touch），领取直接 /claim，绝无 preview', () => {
   const claimSectionSrc = extractFunction('ClaimSection')
-  assert.doesNotMatch(
-    claimSectionSrc,
-    /\/claimable/,
-    'ClaimSection 不应再调用 /claimable：preview 恒空，官方客户端也不调它',
-  )
+  assert.match(claimSectionSrc, /\/claimable/, '0.6.0：探测按钮调 /claimable（已改走官方 marketing/touch，零 captcha）')
   assert.match(claimSectionSrc, /\/claim/, '必须直接走 /claim')
   assert.match(claimSectionSrc, /planId/, '必须按 planId 领取')
+  /** /billing/preview 是死端点：客户端源码任何地方都不许再引用。 */
+  assert.doesNotMatch(claimSectionSrc, /billing\/preview/, 'preview 恒空，官方客户端也不调它')
 })

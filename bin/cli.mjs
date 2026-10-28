@@ -310,7 +310,7 @@ async function cmdClaim() {
       await reportActivation(entry.credential)
       const plans = await fetchClaimablePlans(entry.credential)
       if (plans.length === 0) {
-        log('  今天没有可领的活动（或已领完）')
+        log('  当前没有探测到可领取的活动（官方营销投放可能为空，稍后再试）')
         continue
       }
       for (const plan of plans) {

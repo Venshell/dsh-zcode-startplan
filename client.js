@@ -350,7 +350,7 @@ window.__ModuleLoader__.load({
         async (id) => {
           const planId = (state[id]?.planId ?? '').trim()
           if (planId.length === 0) {
-            patch(id, { error: '请先填 plan_id（活动页上写的那串，如 zcode-v3-start-plan-1028）' })
+            patch(id, { error: '请先填 plan_id（点「探测活动」自动填，或从活动页抄）' })
             return
           }
           patch(id, { loading: true, error: undefined, results: undefined })
@@ -364,6 +364,37 @@ window.__ModuleLoader__.load({
           }
         },
         [onClaimed, state],
+      )
+
+      /**
+       * 探测活动（0.6.0）：调 /claimable（官方 marketing/touch 发现端点，GET、
+       * 零 captcha），把找到的 plan_id 自动填进输入框。多个活动时填第一个
+       * （priority 最高的），其余显示在提示里。
+       */
+      const probe = useCallback(
+        async (id) => {
+          patch(id, { probing: true, error: undefined, results: undefined })
+          try {
+            /** /claimable 是 GET（id 走 query），不走 POST 版 api() 助手。 */
+            const response = await fetch(`${API}/claimable?id=${encodeURIComponent(id)}`)
+            const data = await response.json().catch(() => ({}))
+            if (!response.ok) throw new Error(typeof data?.error === 'string' ? data.error : `HTTP ${response.status}`)
+            const plans = Array.isArray(data.plans) ? data.plans : []
+            if (plans.length === 0) {
+              patch(id, { probing: false, error: data.error ?? '当前没有探测到可领取的活动（投放可能已结束，或稍后再试）' })
+              return
+            }
+            const rest = plans.slice(1).map((plan) => plan.planId).join('、')
+            patch(id, {
+              probing: false,
+              planId: plans[0].planId,
+              probed: `${plans.length} 个活动${rest.length > 0 ? `（其它：${rest}）` : ''}`,
+            })
+          } catch (caught) {
+            patch(id, { probing: false, error: caught instanceof Error ? caught.message : String(caught) })
+          }
+        },
+        [],
       )
 
       /**
@@ -402,8 +433,8 @@ window.__ModuleLoader__.load({
             'span',
             { className: 'zsp-muted' },
             captchaReachable
-              ? '填活动页的 plan_id 直接领取（captcha 载体已就绪）'
-              : '填活动页的 plan_id 直接领取；日常调用模型不受影响，只有领取需要 captcha',
+              ? '「探测活动」自动填 plan_id（发现端点零 captcha），领取才需要 captcha'
+              : '「探测活动」自动填 plan_id；日常调用模型不受影响，只有领取需要 captcha',
           ),
           h('span', { className: 'zsp-spacer' }),
           captchaReachable
@@ -438,11 +469,16 @@ window.__ModuleLoader__.load({
                   h('input', {
                     className: 'zsp-name-input',
                     style: { width: '260px' },
-                    placeholder: 'plan_id（如 zcode-v3-start-plan-1028）',
+                    placeholder: 'plan_id（点「探测」自动填，或从活动页抄）',
                     value: slot.planId ?? '',
                     disabled: busy || slot.loading === true,
                     onChange: (event) => patch(account.id, { planId: event.target.value, error: undefined, results: undefined }),
                   }),
+                  slot.probing === true
+                    ? h('span', { className: 'zsp-muted' }, '探测中…')
+                    : slot.probed !== undefined
+                      ? h('span', { className: 'zsp-muted' }, slot.probed)
+                      : null,
                   slot.loading === true
                     ? h('span', { className: 'zsp-muted' }, '领取中…（captcha 失败会自动重试一次）')
                     : slot.error !== undefined
@@ -467,6 +503,16 @@ window.__ModuleLoader__.load({
                 h(
                   'div',
                   { className: 'zsp-actions', style: { marginTop: 0 } },
+                  h(
+                    'button',
+                    {
+                      className: 'zsp-btn',
+                      onClick: () => void probe(account.id),
+                      disabled: busy || slot.probing === true || slot.loading === true,
+                      title: '查询官方活动发现端点（marketing/touch，无需 captcha），自动填 plan_id',
+                    },
+                    slot.probing === true ? '探测中…' : '探测',
+                  ),
                   h(
                     'button',
                     { className: 'zsp-btn', onClick: () => void claim(account.id), disabled: busy || slot.loading === true },

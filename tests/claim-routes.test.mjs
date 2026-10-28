@@ -87,9 +87,32 @@ const CLAIMABLE_PLANS = [
   { plan_id: 'plan-high', name: 'HIGH', priority: 90 },
 ]
 
+/** 官方形状的 marketing/touch 投放（claim 按钮携带 plan_id）。 */
+const marketingTouchBody = {
+  code: 0,
+  data: {
+    server_time: 1790000000,
+    language: 'zh-CN',
+    deliveries: [
+      {
+        campaign_id: 'camp-low',
+        priority: 10,
+        resource_position: 'popup',
+        popup: { buttons: [{ text: { format: 'plaintext', content: 'LOW' }, action: { type: 'claim_zcode_plan', args: { plan_id: 'plan-low' } } }] },
+      },
+      {
+        campaign_id: 'camp-high',
+        priority: 90,
+        resource_position: 'banner',
+        banner: { buttons: [{ text: { format: 'plaintext', content: 'HIGH' }, action: { type: 'claim_zcode_plan', args: { plan_id: 'plan-high' } } }] },
+      },
+    ],
+  },
+}
+
 /** 假上游：按 URL 分发，并记录 captcha 头，供断言「每个 plan 都重新 mint」。 */
 function makeUpstream({ claimCodes = [0, 0], captchaFails = false } = {}) {
-  const calls = { claim: [], captchaHeaders: [], preview: 0, report: 0 }
+  const calls = { claim: [], captchaHeaders: [], touch: 0, report: 0 }
   let claimIndex = 0
   const fetchImpl = async (url, init = {}) => {
     const target = String(url)
@@ -97,9 +120,9 @@ function makeUpstream({ claimCodes = [0, 0], captchaFails = false } = {}) {
       calls.report += 1
       return new Response(JSON.stringify({ code: 0 }), { status: 200, headers: { 'content-type': 'application/json' } })
     }
-    if (target.includes('/billing/preview')) {
-      calls.preview += 1
-      return new Response(JSON.stringify({ code: 0, data: { plans: CLAIMABLE_PLANS } }), {
+    if (target.includes('/marketing/touch')) {
+      calls.touch += 1
+      return new Response(JSON.stringify(marketingTouchBody), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       })
@@ -152,19 +175,21 @@ function buildRoutes(client) {
   })
 }
 
-test('/claimable: 先补活跃上报再查 preview，返回可领列表', async () => {
+test('/claimable: 走官方 marketing/touch 发现端点，返回投放按钮里的 plan 列表', async () => {
   const { fetchImpl, client, calls } = makeUpstream()
   const routes = buildRoutes(client)
   const res = await withGlobalFetch(fetchImpl, () => call(routes, '/api/zcode-start-plan/claimable', { url: '/api/zcode-start-plan/claimable?id=acc-1' }))
 
   assert.equal(res.status, 200)
   assert.equal(res.body.ok, true)
-  assert.equal(calls.report, 2, 'reportActivation 会发两个事件（launch + daily_active）')
+  assert.equal(calls.touch, 1, '发现走 marketing/touch（官方同款）')
+  assert.equal(calls.report, 2, 'reportActivation 仍会补两个活跃事件（与官方启动行为一致）')
   assert.deepEqual(
     res.body.plans.map((plan) => plan.planId),
     ['plan-high', 'plan-low'],
     'priority 降序',
   )
+  assert.equal(res.body.plans[0].campaignId, 'camp-high', 'campaignId 供 action 上报')
 })
 
 /**
@@ -187,7 +212,8 @@ test('/claim: 直接按 planId 领取，不碰 preview', async () => {
   assert.equal(res.status, 200)
   assert.equal(res.body.ok, true)
   assert.deepEqual(calls.claim, ['plan-high'])
-  assert.equal(calls.preview, 0, '绝不能调用 /billing/preview —— 官方客户端也不调它')
+  assert.equal(calls.preview, undefined, '绝不调用 /billing/preview —— 官方客户端也不调它')
+  assert.equal(calls.touch, 0, '直接领取也不需要先探测（captcha 只为 claim 烧）')
   assert.equal(res.body.results.length, 1)
   assert.equal(res.body.results[0].ok, true)
 })

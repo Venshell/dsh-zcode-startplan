@@ -103,6 +103,19 @@ const DEFAULT_CONFIG = Object.freeze({
     enabled: false,
     port: 17_899,
   }),
+  /**
+   * 自动领取营销活动（0.6.0）。
+   *
+   * 开启后定时扫 `/api/v1/marketing/touch`（官方活动发现端点，GET、零 captcha）；
+   **发现新的 `plan_id` 才 mint captcha 领取**，`0`（成功）/`1003`（已领过）/
+   * `1005`（领完）都会记入已见集合并持久化，绝不重复烧 captcha。
+   */
+  autoClaim: Object.freeze({
+    /** 是否开启自动领取。 */
+    enabled: false,
+    /** 扫描间隔（毫秒）；下限 5 分钟（营销投放官方约 10 分钟一刷）。 */
+    intervalMs: 30 * 60_000,
+  }),
   /** 是否注册 `zcode_start_plan_status` 工具。 */
   statusTool: true,
 })
@@ -119,6 +132,7 @@ export function resolveConfig(raw) {
   const out = { ...DEFAULT_CONFIG, ...src }
   out.captcha = { ...DEFAULT_CONFIG.captcha, ...(src.captcha ?? {}) }
   out.endpoint = { ...DEFAULT_CONFIG.endpoint, ...(src.endpoint ?? {}) }
+  out.autoClaim = { ...DEFAULT_CONFIG.autoClaim, ...(src.autoClaim ?? {}) }
   if (src.models === undefined || src.models === null) out.models = [...DEFAULT_CONFIG.models]
   else if (Array.isArray(src.models)) out.models = src.models.length > 0 ? src.models.slice() : [...DEFAULT_CONFIG.models]
   /** 0.3.0 的 `pinnedAccounts` 同义更名：旧名仍被接受，新名优先。 */
@@ -231,6 +245,11 @@ export function validateConfig(value) {
     throw new Error('config.endpoint.port 必须是 0-65535 的整数')
   }
   if (typeof endpoint.enabled !== 'boolean') throw new Error('config.endpoint.enabled 必须是布尔值')
+  if (typeof out.autoClaim !== 'object' || out.autoClaim === null) throw new Error('config.autoClaim 必须是对象')
+  if (typeof out.autoClaim.enabled !== 'boolean') throw new Error('config.autoClaim.enabled 必须是布尔值')
+  if (!Number.isInteger(out.autoClaim.intervalMs) || out.autoClaim.intervalMs < 5 * 60_000) {
+    throw new Error('config.autoClaim.intervalMs 必须是 ≥ 300000（5 分钟）的整数')
+  }
   if (typeof out.statusTool !== 'boolean') throw new Error('config.statusTool 必须是布尔值')
 
   return out
@@ -246,6 +265,7 @@ export const Config = makeConfigSchema(validateConfig, {
   channel: 'cn',
   captcha: { mode: 'cdp', debugPort: 9229, origin: 'https://zcode.z.ai/' },
   endpoint: { enabled: false, port: 17_899 },
+  autoClaim: { enabled: false, intervalMs: 30 * 60_000 },
   statusTool: true,
 })
 

@@ -216,8 +216,14 @@ node bin/cli.mjs probe       # 真发一条最小请求，验证「选号 → ca
 领取每日额度：
 
 ```powershell
-node bin/cli.mjs claim        # 补活跃上报 → 查可领 → 逐个领取（每个 plan 单独 captcha）
+node bin/cli.mjs claim        # 探测活动（marketing/touch）→ 逐个领取（每个 plan 单独 captcha）
 ```
+
+**活动探测（0.6.0）**：plan_id 不需要手抄——官方把它写在营销投放
+（`GET /api/v1/marketing/touch`）按钮的 `claim_zcode_plan` action 里，
+CLI `claim` 与面板「探测」按钮都会自动发现（GET、零 captcha）。
+面板里也可以开启 `config.autoClaim` 让插件定时探测并自动领取
+（`0`/`1003`/`1005` 记入已领集合，绝不重复烧 captcha）。
 
 `1003`（已领取过）按**幂等成功**处理。
 
@@ -242,6 +248,9 @@ node bin/cli.mjs claim        # 补活跃上报 → 查可领 → 逐个领取�
         endpoint:
           enabled: false                # true 才起本地 Anthropic 端点（仅 llm-pi-ai 回落路线）
           port: 17899
+        autoClaim:
+          enabled: false                # true = 定时探测活动并自动领取（终态码记集合，不重复烧 captcha）
+          intervalMs: 1800000           # 扫描间隔，下限 300000（5 分钟）
         statusTool: true
 ```
 
@@ -300,6 +309,8 @@ Anthropic 端点（`server.mjs`）的形态提供给**开源 ZCode CLI**：导�
 | 非法渠道 provider | 上游返回 500 `code:1000` | 渠道白名单在激活期就拒（`bigmodel` / `zai`） |
 | 领取前不补活跃上报 | `preview` 恒为空 → 永远"没得领" | 每次查 preview 前先发 `app_launch` + `app_daily_active` |
 | 普通浏览器 / `about:blank` 出 captcha | 二次 mint 必 F001 | 用**真实 https origin** 的离屏 iframe（宿主 Electron） |
+| 靠 `/billing/preview` 探测活动 | preview 恒空 → 永远「没得领」 | 0.6.0 起走 `GET /api/v1/marketing/touch`（官方活动发现端点），plan_id 在投放按钮的 `claim_zcode_plan` action 里 |
+| 自动领取不记已领集合 | 投放持续数天，每轮白烧 captcha 吃 1003 | `0`/`1003`/`1005` 终态码持久化（`auto-claim-state.json`），其它码下轮重试 |
 
 ## DSH 宿主契约（**本插件踩过最深的坑**）
 

@@ -3,6 +3,62 @@
 本文件记录**每次修复背后的宿主契约**。只看 diff 看不出「为什么不能改回去」，
 所以把约束与症状一起写下来。
 
+## 0.6.0 — 活动 plan_id 自主探测 + 可选自动领取
+
+### 症状
+
+0.5.4 把领取改成「填 planId 直接 claim」后，用户**无法得知 plan_id**——
+它只存在于 ZCode 官方客户端活动页里，面板与 CLI 都没有获取途径。
+
+### 根因（ZCode 客户端 3.16.3 反编译实证，不是推测）
+
+活动发现的真实链路是**营销投放**，与 `billing/preview` 完全无关：
+
+```
+GET /api/v1/marketing/touch?seq=<n>          ← 官方 createMarketingTouchService.query()，约 10 分钟一次
+  → {code:0, data:{server_time, deliveries:[{
+       campaign_id, priority,
+       resource_position: "banner"|"popup",
+       banner|popup:{ buttons:[{ text:{content}, action:{type:"claim_zcode_plan", args:{plan_id}} }] }
+     }]}}
+GET /api/v1/marketing/touch/action（POST {campaign_id, action_type}）  ← 点击统计，纯上报
+POST /api/v1/zcode-plan/billing/claim {plan_id} + captcha 头            ← 真正领取
+```
+
+`plan_id` 就写在投放按钮的 `claim_zcode_plan` action 里——**官方客户端从来不需要
+用户抄 plan_id**，它按按钮点击。`/billing/preview` 全天 0 次调用，恒空。
+
+### 修复（0.6.0）
+
+- **`fetchClaimablePlans` 改走 `marketing/touch`**（`lib/upstream-api.js`）：
+  从投放按钮提取 `{planId, campaignId, priority, name}`，同 planId 去重取高
+  priority，priority 降序。⚠ 请求头必须带 `X-Client-Language: zh-CN`（服务端按
+  语言过滤投放）；**GET、零 captcha**——发现活动不烧任何稀缺资源。解析失败
+  一律返回 `[]`（投放抖动不该让领取流程崩掉）。
+- **面板「探测」按钮**：每账号一行「探测」→ 自动填最高优先级的 plan_id，
+  其余显示在提示里；探测结果与领取状态分列展示。
+- **`config.autoClaim`（默认关）自动领取**（`lib/auto-claim.js`）：
+  定时（默认 30 分钟，下限 5 分钟）扫全部启用账号的投放 → 发现**未见过**的
+  planId 才 mint captcha 领取。`0`（成功）/`1003`（已领过）/`1005`（领完）
+  三种终态码记入 `seen` 并持久化到 `dataDir/auto-claim-state.json`；
+  captcha 失败与网络异常**不记**（下轮重试，与官方「原地重试消化 CDN 抖动」
+  同策略）。⚠ 为什么必须记集合：投放会持续存在数天，不记的话每 30 分钟就
+  白 mint 一次 captcha 吃一次 1003。官方点击后还会上报
+  `marketing/touch/action confirm`（纯统计，已照做）。
+- **`/claimable` 语义修正**：保留路由（面板探测用），返回
+  `{plans:[{planId, campaignId, priority, name}]}`；不再有「preview 恒空」的死路。
+- **CLI `claim`**：直接受益于新发现端点——现在能自主找到活动并领取，
+  不再依赖「活动页手抄」。
+
+### 硬约束（不要改回去）
+
+| 约束 | 原因 |
+|---|---|
+| 发现必须走 `marketing/touch`，不许回 `billing/preview` | preview 恒空（官方 0 次调用） |
+| 请求头必须带 `X-Client-Language: zh-CN` | 服务端按语言过滤投放，缺省可能空 deliveries |
+| 终态码 `{0,1003,1005}` 之外不记 seen | captcha 稀缺；1003/1005 是「无蜡可蜡」，重试无意义 |
+| autoClaim 下限 5 分钟 | 官方投放刷新约 10 分钟；更频繁只有白扫 |
+
 ## 0.5.5 — 3009 并发限流：忙标记让统一选号绕开忙账号
 
 ### 症状
