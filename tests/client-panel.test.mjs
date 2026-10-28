@@ -354,3 +354,41 @@ test('ClaimSection: captcha 可用时不显示重启按钮', () => {
   assert.ok(!buttons.includes('以调试模式重启'), '载体已就绪就不该再提示重启')
   assert.match(textOf(tree), /captcha 载体已就绪/)
 })
+
+/**
+ * ⚠ 2026-10-28 语义变更：面板不再「先查 preview 再显示领取按钮」。
+ *
+ * 实证：官方客户端全天 0 次调用 `/billing/preview`，点击时直接调 claim。
+ * 我们照抄了源码里存在但从未被使用的方法 → preview 恒空 → 按钮永不出现。
+ *
+ * 新形态：**输入框填 plan_id + 直接领取**，「有没有名额」由服务端裁决。
+ * 本用例锁住这个形态，防止有人把它改回「查列表」。
+ */
+test('ClaimSection: 展开后给输入框与领取按钮，不再依赖 preview 列表', () => {
+  const panel = buildPanel()
+  /** 先渲染一次（触发 open 的初始态）。 */
+  panel.render(panel.ClaimSection({ accounts: [{ id: 'a1', index: 1, nickname: 'ACC', enabled: true }], busy: false, captcha: { reachable: true } }))
+
+  /**
+   * 直接构造展开态：fake React 的 useState 是静态的（不支持 setState 触发重渲染），
+   * 所以这里验证**闭合态**没有把旧文案带回来，并单独验证组件源码不含 preview 依赖。
+   */
+  const collapsed = panel.render(panel.ClaimSection({ accounts: [{ id: 'a1', index: 1, nickname: 'ACC', enabled: true }], busy: false, captcha: { reachable: true } }))
+  const text = textOf(collapsed)
+  /** 旧 UI 的「查看可领取」话术必须消失。 */
+  assert.doesNotMatch(text, /查看可领取/, '不该再有"查看可领取"（它依赖恒空的 preview）')
+  assert.doesNotMatch(text, /暂无可领取的活动/, '不该再显示"暂无可领取"')
+  /** 新话术要在。 */
+  assert.match(text, /plan_id/)
+})
+
+test('ClaimSection 源码不再调用 /claimable（preview 通道）', () => {
+  const claimSectionSrc = extractFunction('ClaimSection')
+  assert.doesNotMatch(
+    claimSectionSrc,
+    /\/claimable/,
+    'ClaimSection 不应再调用 /claimable：preview 恒空，官方客户端也不调它',
+  )
+  assert.match(claimSectionSrc, /\/claim/, '必须直接走 /claim')
+  assert.match(claimSectionSrc, /planId/, '必须按 planId 领取')
+})

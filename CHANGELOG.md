@@ -3,6 +3,58 @@
 本文件记录**每次修复背后的宿主契约**。只看 diff 看不出「为什么不能改回去」，
 所以把约束与症状一起写下来。
 
+## 0.5.4 — 领取改为「直接 claim」：preview 是个从未被调用的端点
+
+### 症状
+
+面板「赠送额度」区永远显示「暂无可领取的活动」，领取按钮**从不出现**；
+但用户在 ZCode 客户端里能看到并成功领取活动（`ZCODE GLOBAL BUILD`）。
+
+### 根因（来自官方客户端日志的实证，不是推测）
+
+分析 `~/.zcode/v2/logs/2026-10-28.log`（2962 次 RPC 调用）的**全天方法名统计**：
+
+| RPC | 次数 | 含义 |
+|---|---|---|
+| `coding-plan-subscription.getManualClaimPlanPreviews` | **0** | 即 `/billing/preview` —— **官方客户端从不调用** |
+| `coding-plan-subscription.claimManualPlan` | 1（用户点击时） | 即 `/billing/claim` |
+| `marketing-touch.query` | 29（约 10 分钟一次） | 活动曝光候选来源 |
+
+领取时刻的完整时序（21:00:41）：
+
+```
+21:00:40.989  captcha attempt.start (source: send_preflight)
+21:00:41.178  resource.failed ×4  ← 阿里云 CDN [prefix].captcha-open.aliyuncs.com
+21:00:41.549  attempt.end outcome=success（第一次是 error，重试后成功）
+21:00:41.741  claimManualPlan OK (193.6ms)
+```
+
+⇒ 官方客户端**从不预判有没有活动**，点按钮就直接 claim，用服务端返回的
+`code`/`msg` 告诉用户结果。我们的 `preview` 恒空，于是按钮永远不出现。
+
+### 修复
+
+- `/claim` **语义变更**：`planId` 必填，不再先查 preview；直接调 claim，
+  业务码**原样回传**（`0` 成功 / `1003` 已领过 / `1005` 领完），
+  不再翻译成含糊的「失败」；
+- **captcha 失败原地重试一次**：对应官方「按两次才领到」的根因
+  （CDN 首轮抖动是常态）。只重试一次 —— mint 有独立退避闸门，无限重试烧设备信誉；
+- `client.js`：`ClaimSection` 从「查看可领取 → 列表 → 领取」改为
+  **输入 `plan_id` + 直接领取**，结果如实显示服务端业务码；
+- `/claimable` 路由**保留**（preview 语义待进一步求证），但**不再作为领取前置**。
+
+### 与「按两次」「没领到」两条用户反馈的对齐
+
+| 反馈 | 实测对应 |
+|---|---|
+| 有时要按两次 | `send_preflight outcome=error` → 6 秒后 `success`；CDN 首轮 4 次 `resource.failed`。已在服务端加重试一次 |
+| 这次没领到是领完了 | `claimManualPlan` 返回 RPC OK（HTTP 层成功），业务层名额已空。现在面板会显示 `code 1005` 而不是含糊失败 |
+
+### 测试
+
+136 个用例（+4）：`/claim` 不碰 preview、缺 planId 给 400、captcha 重试一次成功、
+`1005` 业务码原样回传、`ClaimSection` 源码不含 `/claimable`。
+
 ## 0.5.3 — 出处声明：身份块文本的源头是 Apache-2.0 的开源 ZCode
 
 ### 为什么补这条

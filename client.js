@@ -315,64 +315,66 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 赠送额度领取区（面板底部，按账号一行）。
+     * 赠送额度领取区（面板底部）。
      *
-     * 为什么是独立区块而不是塞进 AccountCard：领取是**低频、且有副作用**的动作
-     * （要 captcha 载体、会烧设备信誉），不该和「使用/删除」这类日常按钮挤在一起；
-     * 而且 `claimable` 每次都要打上游 + 补活跃上报，全账号常驻轮询是浪费。
-     * 故做成**按需展开**：点「查看可领取」才拉一次。
+     * ## 为什么不是「先查列表再点领取」
      *
-     * ⚠ 领取必须逐个 plan **重新 mint captcha**（param 一次性，复用必 3007）——
-     * 这条约束在宿主侧的 /claim 里落实，面板只发起一次请求。
+     * 2026-10-28 分析官方 ZCode 客户端日志（2962 次 RPC）得出：
+     *
+     * | RPC | 全天调用次数 |
+     * |---|---|
+     * | `coding-plan-subscription.getManualClaimPlanPreviews`（`/billing/preview`） | **0** |
+     * | `coding-plan-subscription.claimManualPlan`（`/billing/claim`） | 1（用户点击时） |
+     *
+     * 官方客户端**从不预判有没有活动**：它直接发 claim，用服务端返回的
+     * `code`/`msg` 告诉用户结果。我们此前的「先查 preview，有才显示按钮」
+     * 导致面板永远显示「暂无可领取」——因为 preview 恒空，而活动实际存在。
+     *
+     * 故改为**忠实执行 + 忠实报告**：填 `planId` 直接领，业务码原样显示
+     * （`0` 成功 / `1003` 已领过 / `1005` 领完）。「有没有名额」由服务端裁决。
+     *
+     * ⚠ captcha 失败会原地重试一次（官方日志实证：一次点击里
+     * `send_preflight outcome=error` → 6 秒后 `outcome=success`，因为阿里云
+     * CDN 首轮抖动是常态）。这里是「按两次才领到」的服务端侧对策。
      */
     function ClaimSection(props) {
       const { accounts, busy, onClaimed, captcha } = props
-      /** accountId → { loading, plans, error, results } */
+      /** accountId → { planId, loading, results, error } */
       const [state, setState] = useState({})
       const [open, setOpen] = useState(false)
       const [restarting, setRestarting] = useState(false)
 
       const patch = (id, next) => setState((prev) => ({ ...prev, [id]: { ...prev[id], ...next } }))
 
-      const inspect = useCallback(async (id) => {
-        patch(id, { loading: true, error: undefined, results: undefined })
-        try {
-          const data = await api(`/claimable?id=${encodeURIComponent(id)}`)
-          patch(id, { loading: false, plans: Array.isArray(data.plans) ? data.plans : [], error: data.ok === false ? data.error : undefined })
-        } catch (caught) {
-          patch(id, { loading: false, plans: [], error: caught instanceof Error ? caught.message : String(caught) })
-        }
-      }, [])
-
       const claim = useCallback(
         async (id) => {
+          const planId = (state[id]?.planId ?? '').trim()
+          if (planId.length === 0) {
+            patch(id, { error: '请先填 plan_id（活动页上写的那串，如 zcode-v3-start-plan-1028）' })
+            return
+          }
           patch(id, { loading: true, error: undefined, results: undefined })
           try {
-            const data = await api('/claim', { id })
-            patch(id, { loading: false, results: Array.isArray(data.results) ? data.results : [], message: data.message })
+            const data = await api('/claim', { id, planId })
+            patch(id, { loading: false, results: Array.isArray(data.results) ? data.results : [] })
             /** 领取会改变余额（或生成 pending），刷新面板让进度条同步。 */
             if (typeof onClaimed === 'function') await onClaimed()
           } catch (caught) {
             patch(id, { loading: false, error: caught instanceof Error ? caught.message : String(caught) })
           }
         },
-        [onClaimed],
+        [onClaimed, state],
       )
 
       /**
        * ⚠ 所有 hooks 必须在任何早退之前调用。
-       * 0.5.0 曾把这个 useCallback 放在 `if (!Array.isArray(accounts)) return null`
-       * 之**后**：账号为空时少调一个 hook、非空时多调一个，React 直接抛
-       * 「Rendered fewer hooks than expected」→ 整个面板白屏。
+       * 0.5.0 曾把 useCallback 放在 `return null` 之后 → 两次渲染 hook 数不一致
+       * → React 抛 Rendered fewer hooks than expected → 整个面板白屏。
        */
       const restart = useCallback(async () => {
         setRestarting(true)
         try {
           await api('/restart-cdp', { debugPort: captcha?.debugPort ?? 9229 })
-          /**
-           * 宿主马上要自己关掉，本页面必然断开：不要假装成功，
-           * 直接告诉用户去哪儿重新打开。
-           */
           setState((prev) => ({
             ...prev,
             __restart: '即将以调试模式重启，窗口会关闭并自动重新打开；稍后在浏览器里刷新本页面。',
@@ -386,7 +388,6 @@ window.__ModuleLoader__.load({
 
       if (!Array.isArray(accounts) || accounts.length === 0) return null
 
-      /** captcha 载体是否可用（来自 /summary 的 captcha 探测结果）。 */
       const captchaReachable = captcha !== undefined && captcha.reachable === true
       const captchaReason = captcha?.reason
 
@@ -401,11 +402,10 @@ window.__ModuleLoader__.load({
             'span',
             { className: 'zsp-muted' },
             captchaReachable
-              ? '领取需要一次人机验证（captcha 载体已就绪）'
-              : '领取需要一次人机验证；**日常调用模型不受影响**，只有领取才需要',
+              ? '填活动页的 plan_id 直接领取（captcha 载体已就绪）'
+              : '填活动页的 plan_id 直接领取；日常调用模型不受影响，只有领取需要 captcha',
           ),
           h('span', { className: 'zsp-spacer' }),
-          /** 载体不可用时直接给解法，而不是让用户去手抄 param。 */
           captchaReachable
             ? null
             : h(
@@ -421,14 +421,13 @@ window.__ModuleLoader__.load({
           h(
             'button',
             { className: 'zsp-btn', onClick: () => setOpen((prev) => !prev), disabled: busy },
-            open ? '收起' : '查看可领取',
+            open ? '收起' : '领取',
           ),
         ),
         state.__restart !== undefined ? h('span', { className: 'zsp-muted' }, state.__restart) : null,
         open
           ? accounts.map((account) => {
               const slot = state[account.id] ?? {}
-              const plans = slot.plans ?? []
               return h(
                 'div',
                 { key: account.id, className: 'zsp-row', style: { alignItems: 'flex-start' } },
@@ -436,46 +435,42 @@ window.__ModuleLoader__.load({
                 h(
                   'div',
                   { className: 'zsp-meter', style: { flex: '1 1 auto' } },
+                  h('input', {
+                    className: 'zsp-name-input',
+                    style: { width: '260px' },
+                    placeholder: 'plan_id（如 zcode-v3-start-plan-1028）',
+                    value: slot.planId ?? '',
+                    disabled: busy || slot.loading === true,
+                    onChange: (event) => patch(account.id, { planId: event.target.value, error: undefined, results: undefined }),
+                  }),
                   slot.loading === true
-                    ? h('span', { className: 'zsp-muted' }, '查询中…')
+                    ? h('span', { className: 'zsp-muted' }, '领取中…（captcha 失败会自动重试一次）')
                     : slot.error !== undefined
                       ? h('span', { className: 'zsp-error' }, slot.error)
                       : slot.results !== undefined
                         ? h(
                             'span',
                             { className: 'zsp-muted' },
-                            slot.results.length === 0
-                              ? (slot.message ?? '没有可领取的活动')
-                              : slot.results
-                                  .map((item) =>
-                                    `${item.ok ? '✓' : '✗'} ${item.name ?? item.planId}` +
-                                    `${item.alreadyClaimed === true ? '（已领过）' : ''}` +
-                                    `${item.ok === true ? '' : ` ${item.error ?? ''}`}`,
-                                  )
-                                  .join('；'),
+                            slot.results
+                              .map((item) => {
+                                /** 忠实回传服务端裁决，不做含糊翻译。 */
+                                if (item.ok === true) {
+                                  return `✓ 领取成功${item.alreadyClaimed === true ? '（此前已领过，幂等）' : ''}`
+                                }
+                                const code = item.code !== undefined ? `code ${item.code}` : `HTTP ${item.httpStatus}`
+                                return `✗ ${code}：${item.message ?? item.error ?? '未知原因'}`
+                              })
+                              .join('；'),
                           )
-                        : plans.length === 0
-                          ? h('span', { className: 'zsp-muted' }, '暂无可领取的活动')
-                          : h(
-                              'span',
-                              { className: 'zsp-muted' },
-                              plans.map((plan) => `${plan.name ?? plan.planId}（优先级 ${plan.priority ?? 0}）`).join('、'),
-                            ),
+                        : null,
                 ),
                 h(
                   'div',
                   { className: 'zsp-actions', style: { marginTop: 0 } },
-                  plans.length > 0 && slot.results === undefined
-                    ? h(
-                        'button',
-                        { className: 'zsp-btn', onClick: () => void claim(account.id), disabled: busy || slot.loading === true },
-                        `领取 ${plans.length > 1 ? `全部 ${plans.length} 个` : ''}`,
-                      )
-                    : null,
                   h(
                     'button',
-                    { className: 'zsp-btn', onClick: () => void inspect(account.id), disabled: busy || slot.loading === true },
-                    plans.length > 0 || slot.results !== undefined ? '重新查询' : '查询',
+                    { className: 'zsp-btn', onClick: () => void claim(account.id), disabled: busy || slot.loading === true },
+                    slot.loading === true ? '领取中…' : '领取',
                   ),
                 ),
               )

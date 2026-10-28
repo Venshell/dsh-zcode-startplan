@@ -167,17 +167,40 @@ test('/claimable: 先补活跃上报再查 preview，返回可领列表', async 
   )
 })
 
-test('/claim: 每个 plan 重新 mint captcha（param 不同），全部成功', async () => {
-  const { fetchImpl, client, calls } = makeUpstream({ claimCodes: [0, 0] })
+/**
+ * ⚠ 语义变更（2026-10-28）：`/claim` 不再「先查 preview 再领」。
+ *
+ * 实证：官方 ZCode 客户端全天 0 次调用 `getManualClaimPlanPreviews`
+ * （`/billing/preview`），点击时直接调 `claimManualPlan`（`/billing/claim`）。
+ * 我们照抄源码里存在但从未被使用的方法，导致面板永远「暂无可领取」。
+ *
+ * 新语义：`planId` 必填，直接 claim，业务码原样回传。
+ * 「有没有名额」由服务端裁决（0 成功 / 1003 已领过 / 1005 领完）。
+ */
+test('/claim: 直接按 planId 领取，不碰 preview', async () => {
+  const { fetchImpl, client, calls } = makeUpstream({ claimCodes: [0] })
   const routes = buildRoutes(client)
-  const res = await withGlobalFetch(fetchImpl, () => call(routes, '/api/zcode-start-plan/claim', { method: 'POST', body: { id: 'acc-1' } }))
+  const res = await withGlobalFetch(fetchImpl, () =>
+    call(routes, '/api/zcode-start-plan/claim', { method: 'POST', body: { id: 'acc-1', planId: 'plan-high' } }),
+  )
 
   assert.equal(res.status, 200)
   assert.equal(res.body.ok, true)
-  assert.deepEqual(calls.claim, ['plan-high', 'plan-low'])
-  assert.deepEqual(calls.captchaHeaders, ['param-1', 'param-2'], '两次领取必须用不同的 captcha param')
-  assert.equal(res.body.results.length, 2)
-  assert.ok(res.body.results.every((item) => item.ok === true))
+  assert.deepEqual(calls.claim, ['plan-high'])
+  assert.equal(calls.preview, 0, '绝不能调用 /billing/preview —— 官方客户端也不调它')
+  assert.equal(res.body.results.length, 1)
+  assert.equal(res.body.results[0].ok, true)
+})
+
+test('/claim: 缺 planId 给 400（不再靠 preview 兜底猜 plan）', async () => {
+  const { fetchImpl, client, calls } = makeUpstream()
+  const routes = buildRoutes(client)
+  const res = await withGlobalFetch(fetchImpl, () =>
+    call(routes, '/api/zcode-start-plan/claim', { method: 'POST', body: { id: 'acc-1' } }),
+  )
+  assert.equal(res.status, 400)
+  assert.match(res.body.error, /planId/)
+  assert.equal(calls.claim.length, 0, '参数不全时不能发 claim（会白发 captcha）')
 })
 
 test('/claim: 1003（已领过）算幂等成功，不报错', async () => {
@@ -192,26 +215,56 @@ test('/claim: 1003（已领过）算幂等成功，不报错', async () => {
   assert.equal(res.body.results[0].alreadyClaimed, true)
 })
 
-test('/claim: 指定 planId 只领那一个', async () => {
-  const { fetchImpl, client, calls } = makeUpstream()
-  const routes = buildRoutes(client)
-  await withGlobalFetch(fetchImpl, () =>
-    call(routes, '/api/zcode-start-plan/claim', { method: 'POST', body: { id: 'acc-1', planId: 'plan-low' } }),
-  )
-  assert.deepEqual(calls.claim, ['plan-low'])
-})
-
-test('/claim: captcha 产出失败即停，不连环重试', async () => {
+test('/claim: captcha 失败只重试一次，仍失败则不碰 claim', async () => {
   const { fetchImpl, client, calls } = makeUpstream({ captchaFails: true })
   const routes = buildRoutes(client)
   const res = await withGlobalFetch(fetchImpl, () =>
-    call(routes, '/api/zcode-start-plan/claim', { method: 'POST', body: { id: 'acc-1' } }),
+    call(routes, '/api/zcode-start-plan/claim', { method: 'POST', body: { id: 'acc-1', planId: 'plan-high' } }),
   )
 
   assert.equal(res.body.ok, false)
-  assert.match(res.body.results[0].error, /captcha 产出失败/)
+  assert.match(res.body.results[0].error, /captcha 产出失败（尝试 2 次）/)
   assert.equal(calls.claim.length, 0, 'captcha 没拿到就绝不能打 claim（烧设备信誉）')
-  assert.equal(res.body.results.length, 1, '失败后不再尝试第二个 plan')
+})
+
+/**
+ * ⚠ 「按两次才领到」的服务端侧对策。
+ *
+ * 官方客户端日志实证（2026-10-28 21:00）：一次点击里
+ * `send_preflight outcome=error` → 6 秒后 `outcome=success` → 才发 claim。
+ * 根因是阿里云 CDN 首轮抖动（连续 4 次 resource.failed，几十到两百毫秒）。
+ * 所以我们也要**原地重试一次**，而不是一失败就把错误甩给用户。
+ */
+test('/claim: captcha 首次失败、第二次成功 → 正常领取（对应"按两次"）', async () => {
+  const { fetchImpl, client, calls } = makeUpstream({ claimCodes: [0] })
+  let mintCount = 0
+  const flakyClient = {
+    async mintCaptcha() {
+      mintCount += 1
+      if (mintCount === 1) throw new Error('阿里云 CDN 抖动（模拟首轮 resource.failed）')
+      return { param: `param-retry-${mintCount}`, region: 'cn' }
+    },
+  }
+  const routes = buildRoutes(flakyClient)
+  const res = await withGlobalFetch(fetchImpl, () =>
+    call(routes, '/api/zcode-start-plan/claim', { method: 'POST', body: { id: 'acc-1', planId: 'plan-high' } }),
+  )
+
+  assert.equal(mintCount, 2, 'captcha 必须重试一次')
+  assert.equal(res.body.ok, true)
+  assert.deepEqual(calls.claim, ['plan-high'])
+  assert.equal(calls.captchaHeaders[0], 'param-retry-2', '使用重试拿到的 param')
+})
+
+test('/claim: 1005（领完）原样回传业务码，不吞成含糊失败', async () => {
+  const { fetchImpl, client } = makeUpstream({ claimCodes: [1005] })
+  const routes = buildRoutes(client)
+  const res = await withGlobalFetch(fetchImpl, () =>
+    call(routes, '/api/zcode-start-plan/claim', { method: 'POST', body: { id: 'acc-1', planId: 'plan-high' } }),
+  )
+  assert.equal(res.body.ok, false)
+  assert.equal(res.body.results[0].code, 1005, '业务码必须原样回传，供面板如实显示')
+  assert.equal(res.body.results[0].httpStatus, 200)
 })
 
 test('/claimable: 账号不存在给 404；未知路径不会误配', async () => {
