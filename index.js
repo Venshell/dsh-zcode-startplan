@@ -76,6 +76,13 @@ const DEFAULT_CONFIG = Object.freeze({
    * （0.3.0 的 `pinnedAccounts` 同义更名，旧值仍被接受。）
    */
   accountProviders: true,
+  /**
+   * 统一选号的取号顺序（0.7.0）：
+   * - 'expiry'（默认）：**快过期的先用** —— 先吃快过期账号的额度，减少到期作废的浪费；
+   * - 'manual'：按面板「使用」置顶的顺序（0.6.x 的旧行为）。
+   * 两种策略下钉定栏位都固定吃指定账号，不受影响。
+   */
+  selectionOrder: 'expiry',
   /** 上游模型目录缓存时长（毫秒）。 */
   modelCacheMs: 10 * 60_000,
   /** 数据目录（空 = ~/.dsh/zcode-start-plan）。 */
@@ -222,6 +229,9 @@ export function validateConfig(value) {
   if (typeof out.accountProviders !== 'boolean') {
     throw new Error('config.accountProviders 必须是布尔值')
   }
+  if (out.selectionOrder !== 'expiry' && out.selectionOrder !== 'manual') {
+    throw new Error('config.selectionOrder 只能是 "expiry"（快过期先用）或 "manual"（手动置顶优先）')
+  }
   if (!Number.isInteger(out.modelCacheMs) || out.modelCacheMs < 0) {
     throw new Error('config.modelCacheMs 必须是非负整数')
   }
@@ -260,6 +270,7 @@ export const Config = makeConfigSchema(validateConfig, {
   displayName: 'ZCode Start Plan（赠送免费 plan）',
   models: [...DEFAULT_MODELS],
   accountProviders: true,
+  selectionOrder: 'expiry',
   modelCacheMs: 10 * 60_000,
   dataDir: '',
   channel: 'cn',

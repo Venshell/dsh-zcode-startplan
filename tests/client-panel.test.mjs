@@ -520,9 +520,10 @@ test('AccountCard: 单桶时走汇总条（不重复画）', () => {
   assert.equal(bars.length, 1, '单桶 = 一条')
 })
 
-test('AccountCard: 使用按钮说明作用域（统一选号生效，钉定栏位不受影响）', () => {
+test('AccountCard: 0.7.0 移除「使用」按钮（统一选号按到期时间取号，置顶已无意义）', () => {
   const src = extractFunction('AccountCard')
-  assert.match(src, /下次统一选号优先用这个账号/, 'title 必须写明实际作用')
-  assert.match(src, /钉定栏位不受影响/, '必须提示钉定路由不参与换号（避免「点了没作用」的误会）')
-  assert.match(src, /使用中/, '首位显示使用中')
+  assert.doesNotMatch(src, /'使用'/, '「使用」按钮已移除：expiry 模式下置顶不决定取号顺序')
+  assert.doesNotMatch(src, /使用中/, '不再有「使用中」态')
+  /** 快过期的先用 —— 面板不再提供手动置顶入口。 */
+  assert.doesNotMatch(src, /onUse/, 'onUse 链路应一并移除')
 })

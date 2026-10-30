@@ -34,6 +34,7 @@ test('add 以 user_id 去重：同账号再登录只更新凭据', withPool(asyn
 }))
 
 test('pick 遵守手动顺序，并跳过 exclude 中的账号', withPool(async (pool) => {
+  pool.setSelectionOrder('manual')
   pool.add(credential('a'), 'A')
   pool.add(credential('b'), 'B')
   const first = pool.pick('GLM-5.3-Flash')
@@ -41,6 +42,43 @@ test('pick 遵守手动顺序，并跳过 exclude 中的账号', withPool(async 
   const second = pool.pick('GLM-5.3-Flash', new Set([first.entry.id]))
   assert.equal(second.entry.nickname, 'B')
   assert.equal(pool.pick('GLM-5.3-Flash', new Set([first.entry.id, second.entry.id])), null)
+}))
+
+test('默认 expiry 选号：快过期的先用，无到期数据的排后但不被跳过', withPool(async (pool) => {
+  assert.equal(pool.selectionOrder, 'expiry', '0.7.0 起默认 expiry')
+  const a = pool.add(credential('a'), 'A').entry
+  const b = pool.add(credential('b'), 'B').entry
+  const c = pool.add(credential('c'), 'C').entry
+
+  /** A 还没拉过余额（无缓存）；B 7 天后到期；C 1 小时后到期 → C 最优先。 */
+  pool.noteExpiry(b.id, Date.now() + 7 * 86_400_000)
+  pool.noteExpiry(c.id, Date.now() + 3_600_000)
+  assert.equal(pool.pick('GLM-5.3-Flash').entry.nickname, 'C', '快过期先用')
+  assert.equal(pool.pick('GLM-5.3-Flash', new Set([c.id])).entry.nickname, 'B')
+  assert.equal(pool.pick('GLM-5.3-Flash', new Set([c.id, b.id])).entry.nickname, 'A', '无到期数据仍参与（排最后）')
+
+  /** 全部用光（noteExpiry 0）= 回到手动顺序兜底。 */
+  pool.noteExpiry(c.id, 0)
+  pool.noteExpiry(b.id, 0)
+  assert.equal(pool.pick('GLM-5.3-Flash').entry.nickname, 'A')
+  /** noteExpiry 负数/NaN 同样按「无数据」处理。 */
+  pool.noteExpiry(a.id, -5)
+  assert.equal(pool.expiryOf(a.id), undefined)
+}))
+
+test('expiry 模式下 /use 置顶不再决定取号顺序（两种策略互斥）', withPool(async (pool) => {
+  const a = pool.add(credential('a'), 'A').entry
+  const b = pool.add(credential('b'), 'B').entry
+  pool.noteExpiry(b.id, Date.now() + 3_600_000)
+  /** 置顶 A（模拟 /use：改 added_at 顺序）—— expiry 模式下 B 仍因快过期而优先。 */
+  pool.reorder([a.id, b.id])
+  assert.equal(pool.pick('GLM-5.3-Flash').entry.nickname, 'B', '快过期优先于置顶')
+  /** 切回 manual：置顶立即生效。 */
+  pool.setSelectionOrder('manual')
+  assert.equal(pool.pick('GLM-5.3-Flash').entry.nickname, 'A')
+  /** 非法值回落 expiry（默认）。 */
+  pool.setSelectionOrder('bogus')
+  assert.equal(pool.selectionOrder, 'expiry')
 }))
 
 test('markModelRateLimited 只影响那一对「账号×模型」，且到期后恢复', withPool(async (pool, store) => {

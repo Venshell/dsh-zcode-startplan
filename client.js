@@ -611,7 +611,7 @@ window.__ModuleLoader__.load({
      * 按钮只有两个：「使用」（置顶，下次请求即用它）与「删除」。
      */
     function AccountCard(props) {
-      const { account, balance, busy, isNext, modelListVisible, onToggleModelList, confirmId, setConfirmId, onUse, onRemove, onRename } = props
+      const { account, balance, busy, isNext, modelListVisible, onToggleModelList, confirmId, setConfirmId, onRemove, onRename } = props
       /** Host 下发的是 `modelRateLimits` 对象（model → resetAt），摊平成 chips。 */
       const limited = Object.entries(account.modelRateLimits ?? {})
         .map(([model, resetAt]) => ({ model, resetAt }))
@@ -700,23 +700,11 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'zsp-actions' },
           /**
-           * 「使用」= 把该账号置顶（手动顺序即选号优先级，`pick()` 取第一个
-           * 启用且未限流的账号）；正在使用时显示「使用中」并禁用。
-           * ⚠ 作用域说明（避免「点了没作用」的误会）：置顶只影响**统一选号**
-           * 栏位（不带账号后缀的模型条目）的取号顺序。模型选择器里
-           * 「-acct-xxx」钉定栏位固定消耗指定账号的额度，本就不参与换号，
-           * 置顶对它无效是设计契约。
+           * ⚠ 0.7.0 移除「使用」按钮：统一选号默认按**到期时间**取号
+           * （快过期先用，config.selectionOrder），手动置顶不再决定顺序 ——
+           * 按钮也就失去了意义（0.6.9 的「点了没作用」反馈即源于此）。
+           * 钉定栏位固定吃指定账号，本就不需要置顶。
            */
-          h(
-            'button',
-            {
-              className: 'zsp-btn',
-              onClick: onUse,
-              disabled: busy || isNext === true,
-              title: '下次统一选号优先用这个账号（钉定栏位不受影响）',
-            },
-            isNext === true ? '使用中' : '使用',
-          ),
           confirmId === account.id
             ? h(
                 'button',
@@ -1133,7 +1121,6 @@ window.__ModuleLoader__.load({
                   onToggleModelList: (visible) => void act('/model-list-visible', { id: account.id, visible }),
                   confirmId,
                   setConfirmId,
-                  onUse: () => void act('/use', { id: account.id }),
                   onRemove: () => void act('/remove', { id: account.id }),
                   onRename: (nickname) => void act('/rename', { id: account.id, nickname }),
                 }),
