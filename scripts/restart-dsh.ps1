@@ -73,10 +73,11 @@ try {
 
     $exeDir = Split-Path $exe
     if ($DebugPort -gt 0) {
-        $command = '"' + $exe + '" --remote-debugging-port=' + $DebugPort
+        # ⚠ 前缀 & ：带引号路径直接跟参数会被 PowerShell 当成输出语句（用户实测踩坑）。
+        $command = '& "' + $exe + '" --remote-debugging-port=' + $DebugPort
         $why = "要让 captcha 可用，需要以调试端口 $DebugPort 启动一次。"
     } else {
-        $command = '"' + $exe + '"'
+        $command = '& "' + $exe + '"'
         $why = '要重载插件（普通重启，不带调试端口）。'
     }
 
