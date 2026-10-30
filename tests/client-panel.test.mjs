@@ -399,12 +399,14 @@ test('ClaimSection 源码：展开时自动探测（useEffect + /claimable），
   assert.match(claimSectionSrc, /onToggleAutoClaim/, '拨盘要能把开关写回宿主')
 })
 
-test('ClaimSection 源码：重启是两段式确认，且明确告知会中断任务', () => {
+test('ClaimSection 源码：重启只给指引，不再替用户执行', () => {
   const claimSectionSrc = extractFunction('ClaimSection')
-  assert.match(claimSectionSrc, /confirmRestart/, '重启需要二次确认状态')
-  assert.match(claimSectionSrc, /确认重启？会中断任务/, '确认按钮必须写明后果')
-  assert.match(claimSectionSrc, /confirm: true/, '调用重启端点要带服务端要求的二次确认')
-  assert.match(claimSectionSrc, /中断/, '提示里必须说明重启会中断任务')
+  /** 0.6.6：杀进程重启被 AV 判毒，且脚本会被宿主 Job Object 连带杀死 → 只给命令。 */
+  assert.doesNotMatch(claimSectionSrc, /confirmRestart/, '不应再有杀进程式二次确认（端点已只返回命令）')
+  assert.match(claimSectionSrc, /__restart:\s*data\?\.\s*command/, '展示服务端返回的启动命令')
+  assert.match(claimSectionSrc, /__restartNote/, '展示说明（普通重启 / 带端口）')
+  assert.match(claimSectionSrc, /restart\('plain'\)/, '普通重启指引（不带端口）')
+  assert.match(claimSectionSrc, /restart\('debug'\)/, '带端口重启指引')
 })
 
 /**

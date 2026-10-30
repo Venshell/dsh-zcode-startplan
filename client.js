@@ -65,6 +65,9 @@ window.__ModuleLoader__.load({
       .zsp-chip{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--dsw-alias-border-l1);border-radius:999px;padding:1px 8px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary)}
       /* 探测到的 plan_id：只读展示（没有手输路径，见 ClaimSection 渲染处注释）。 */
       .zsp-plan-id{font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2);border-radius:4px;padding:1px 6px;user-select:all}
+      /* 重启指引块：说明 + 可复制的启动命令。 */
+      .zsp-restart-guide{display:flex;flex-direction:column;gap:4px;min-width:0}
+      .zsp-restart-guide .zsp-plan-id{font-size:12px;line-height:20px;align-self:flex-start;max-width:100%;white-space:pre-wrap;word-break:break-all}
       .zsp-chip[data-limited=true]{color:var(--dsw-alias-label-danger);border-color:var(--dsw-alias-label-danger)}
       .zsp-bar{height:6px;border-radius:3px;background:var(--dsw-alias-bg-layer-2);overflow:hidden;width:100%}
       .zsp-bar>span{display:block;height:100%;background:var(--dsw-alias-state-business-primary)}
@@ -346,12 +349,6 @@ window.__ModuleLoader__.load({
       const [state, setState] = useState({})
       const [open, setOpen] = useState(false)
       const [restarting, setRestarting] = useState(false)
-      /**
-       * 重启二次确认（0.6.3）。重启会**杀掉整个宿主进程** —— 所有正在跑的
-       * 任务、未写完的回复都会中断。这条代价必须在点下去之前说清楚，
-       * 所以做成两段式：先「重启」→ 变成「确认重启？会中断任务」，再点才执行。
-       */
-      const [confirmRestart, setConfirmRestart] = useState(undefined)
       const [togglingAuto, setTogglingAuto] = useState(false)
 
       const patch = (id, next) => setState((prev) => ({ ...prev, [id]: { ...prev[id], ...next } }))
@@ -430,26 +427,24 @@ window.__ModuleLoader__.load({
        * 0.5.0 曾把 useCallback 放在 `return null` 之后 → 两次渲染 hook 数不一致
        * → React 抛 Rendered fewer hooks than expected → 整个面板白屏。
        *
-       * @param {'plain' | 'debug'} mode
-       *   `plain` = 普通重启（重载插件即可，不带 CDP 端口）；
-       *   `debug` = 带端口重启（captcha 需要）。
-       *   ⚠ 「重载插件」**不依赖调试模式** —— 这只是两种重启姿势的选择。
+       * 0.6.6 起「重启」改为**取指引**：端点不再替用户执行（杀进程 + 计划任务
+       * 被火绒判毒，且宿主 Job Object 会连带杀死脚本），只返回用户可复制的
+       * 启动命令。这里拿到后展示出来，让用户自己完成重启。
+       *
+       * @param {'plain' | 'debug'} mode `debug` 才带 `--remote-debugging-port`。
        */
       const restart = useCallback(async (mode = 'debug') => {
-        setConfirmRestart(undefined)
         setRestarting(true)
         try {
           const debugPort = mode === 'debug' ? captcha?.debugPort ?? 9229 : undefined
-          /** `confirm: true` 是服务端要求的二次确认（重启会中断所有任务）。 */
-          const data = await api('/restart-cdp', { ...(debugPort !== undefined ? { debugPort } : {}), confirm: true })
+          const data = await api('/restart-cdp', { ...(debugPort !== undefined ? { debugPort } : {}) })
           setState((prev) => ({
             ...prev,
-            __restart:
-              `已请求重启（约 ${Math.round((data?.estimatedReadyMs ?? 20_000) / 1000)} 秒后可用）。` +
-              '**所有正在运行的任务都会中断**，窗口关闭后会自动重开；稍后在浏览器里刷新本页面。',
+            __restart: data?.command ?? '未拿到重启指引（请查看插件日志）',
+            __restartNote: data?.note,
           }))
         } catch (caught) {
-          setState((prev) => ({ ...prev, __restart: `重启失败：${caught instanceof Error ? caught.message : String(caught)}` }))
+          setState((prev) => ({ ...prev, __restart: `获取指引失败：${caught instanceof Error ? caught.message : String(caught)}` }))
         } finally {
           setRestarting(false)
         }
@@ -476,62 +471,37 @@ window.__ModuleLoader__.load({
           ),
           h('span', { className: 'zsp-spacer' }),
           /**
-           * ⚠ 两件事别混成一件（0.6.4）：
+           * ⚠ 两件事别混成一件：
+           * - **重载插件**：任何模式下重启都行，与 `--remote-debugging-port` 无关；
+           * - **开调试端口**：只为 captcha 载体。
            *
-           * - **重载插件**：装/更新了插件要让它生效 → 任何模式下重启都行，
-           *   与 `--remote-debugging-port` **毫无关系**；
-           * - **开调试端口**：只为领额度时的 captcha 载体 → 必须带参数。
-           *
-           * 旧文案把前者写成「以调试模式重启」，等于告诉用户「普通模式不能重启」，
-           * 这是错的：不带端口重启同样生效，只是 captcha 领不了。
+           * 0.6.6 起按钮只做「取指引」：点击后展示可复制的启动命令，由**用户**
+           * 自己退出并重开 —— 插件不再杀进程（杀进程 + 计划任务被火绒判毒，
+           * 且宿主 Job Object 会连带杀死执行脚本）。
            */
           captchaReachable
-            ? confirmRestart === 'plain'
-              ? h(
-                  'button',
-                  {
-                    className: 'zsp-btn',
-                    'data-danger': 'true',
-                    onClick: () => void restart('plain'),
-                    disabled: busy || restarting,
-                    title: '重启会关闭整个宿主；所有正在运行的任务都会被中断',
-                  },
-                  restarting ? '重启中…' : '确认重启？会中断任务',
-                )
-              : h(
-                  'button',
-                  {
-                    className: 'zsp-btn',
-                    onClick: () => setConfirmRestart('plain'),
-                    disabled: busy || restarting,
-                    title: '重载插件（不带调试端口，captcha 领取暂不可用）。⚠ 会中断正在运行的任务。',
-                  },
-                  '重启',
-                )
-            : confirmRestart === 'debug'
-              ? h(
-                  'button',
-                  {
-                    className: 'zsp-btn',
-                    'data-danger': 'true',
-                    onClick: () => void restart('debug'),
-                    disabled: busy || restarting,
-                    title: '重启会关闭整个宿主；所有正在运行的任务都会被中断',
-                  },
-                  restarting ? '重启中…' : '确认重启？会中断任务',
-                )
-              : h(
-                  'button',
-                  {
-                    className: 'zsp-btn',
-                    onClick: () => setConfirmRestart('debug'),
-                    disabled: busy || restarting,
-                    title:
-                      `${captchaReason ?? '需要调试端口才能产出 captcha'}。` +
-                      '⚠ 重启会中断所有正在运行的任务。',
-                  },
-                  '开调试端口重启',
-                ),
+            ? h(
+                'button',
+                {
+                  className: 'zsp-btn',
+                  onClick: () => void restart('plain'),
+                  disabled: busy || restarting,
+                  title: '生成普通重启指引（重载插件，不带调试端口）',
+                },
+                restarting ? '获取中…' : '重启指引',
+              )
+            : h(
+                'button',
+                {
+                  className: 'zsp-btn',
+                  onClick: () => void restart('debug'),
+                  disabled: busy || restarting,
+                  title:
+                    `${captchaReason ?? '需要调试端口才能产出 captcha'}。` +
+                    '点击获取带调试端口的启动命令（由你手动执行）。',
+                },
+                restarting ? '获取中…' : '开调试端口重启',
+              ),
           h(
             'button',
             { className: 'zsp-btn', onClick: () => setOpen((prev) => !prev), disabled: busy },
@@ -563,7 +533,15 @@ window.__ModuleLoader__.load({
             label: '自动领取',
           }),
         ),
-        state.__restart !== undefined ? h('span', { className: 'zsp-muted' }, state.__restart) : null,
+        state.__restart !== undefined
+          ? h(
+              'div',
+              { className: 'zsp-restart-guide' },
+              h('div', { className: 'zsp-muted' }, state.__restartNote ?? '请手动完成重启：'),
+              /** 命令用 code 块展示（user-select:all，点一下全选，方便复制）。 */
+              h('code', { className: 'zsp-plan-id' }, state.__restart),
+            )
+          : null,
         open
           ? accounts.map((account) => {
               const slot = state[account.id] ?? {}

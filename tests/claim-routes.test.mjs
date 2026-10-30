@@ -312,50 +312,29 @@ test('/claim: 缺 id 给 400', async () => {
   assert.equal(res.status, 400)
 })
 
-test('/restart-cdp: 把 debugPort 与等待时长交给重启实现，不阻塞响应', async () => {
-  const calls = []
+test('/restart-cdp: 返回可复制的启动命令（不再替用户执行）', async () => {
+  const built = []
   const routes = makeManageRoutes({
     pool,
     client: {},
     fetchBalance: async () => undefined,
     settings: {},
     log: () => {},
-    requestRestart: async (options) => {
-      calls.push(options)
+    buildRestartCommand: (options) => {
+      built.push(options)
+      return { command: '"DSH.exe" --remote-debugging-port=9333', port: 9333, note: '带端口重启' }
     },
   })
   const res = await call(routes, '/api/zcode-start-plan/restart-cdp', {
     method: 'POST',
-    body: { debugPort: 9333, waitSeconds: 5, confirm: true },
+    body: { debugPort: 9333 },
   })
   assert.equal(res.status, 200)
   assert.equal(res.body.ok, true)
-  assert.equal(res.body.debugPort, 9333)
-  assert.deepEqual(calls, [{ debugPort: 9333, waitSeconds: 5 }])
-  assert.equal(typeof res.body.estimatedReadyMs, 'number')
-})
-
-/**
- * ⚠ 二次确认（0.6.3）：重启会杀掉整个宿主，**所有正在运行的任务都会中断**。
- * 面板有两段式按钮，服务端也要求显式 `confirm: true` —— 直接打端点的调用
- * （脚本 / 旧版页面 / 误触）不该悄悄把宿主干掉。
- */
-test('/restart-cdp: 没有 confirm:true 一律 400，且绝不触发重启', async () => {
-  const calls = []
-  const routes = makeManageRoutes({
-    pool,
-    client: {},
-    settings: {},
-    log: () => {},
-    requestRestart: async (options) => calls.push(options),
-  })
-  for (const body of [{ debugPort: 9333 }, { debugPort: 9333, confirm: false }, { debugPort: 9333, confirm: 'true' }]) {
-    const res = await call(routes, '/api/zcode-start-plan/restart-cdp', { method: 'POST', body })
-    assert.equal(res.status, 400, `body=${JSON.stringify(body)} 必须被拒`)
-    assert.equal(res.body.requiresConfirm, true)
-    assert.match(res.body.error, /中断/)
-  }
-  assert.equal(calls.length, 0, '未确认时绝不能真的去重启宿主')
+  assert.equal(res.body.mode, 'debug')
+  assert.equal(res.body.command, '"DSH.exe" --remote-debugging-port=9333')
+  assert.equal(res.body.port, 9333)
+  assert.deepEqual(built, [{ debugPort: 9333 }])
 })
 
 /**
@@ -363,79 +342,61 @@ test('/restart-cdp: 没有 confirm:true 一律 400，且绝不触发重启', asy
  * 「重载插件」与「开调试端口」是两件事 —— 旧实现无条件 `?? 9229`，
  * 等于把「我只想重载插件」偷偷变成「开调试端口」。
  */
-test('/restart-cdp: 省略 debugPort = 普通重启（不偷偷开调试端口）', async () => {
-  const calls = []
+test('/restart-cdp: 省略 debugPort = 普通重启指引（不带端口）', async () => {
+  const built = []
   const routes = makeManageRoutes({
     pool,
     client: {},
     settings: {},
     log: () => {},
-    requestRestart: async (options) => calls.push(options),
+    buildRestartCommand: (options) => {
+      built.push(options)
+      return { command: '"DSH.exe"', port: null, note: '普通重启' }
+    },
   })
-  const res = await call(routes, '/api/zcode-start-plan/restart-cdp', {
-    method: 'POST',
-    body: { confirm: true },
-  })
+  const res = await call(routes, '/api/zcode-start-plan/restart-cdp', { method: 'POST', body: {} })
   assert.equal(res.status, 200)
-  assert.equal(res.body.ok, true)
-  assert.equal(calls.length, 1)
-  assert.equal('debugPort' in calls[0], false, '普通重启不得给重启实现传 debugPort')
-  assert.equal(res.body.debugPort, undefined, '响应也不该报端口')
+  assert.equal(res.body.mode, 'plain')
+  assert.equal(res.body.port, null)
+  assert.equal(res.body.command, '"DSH.exe"')
+  assert.deepEqual(built, [{}], '普通重启不得给命令生成器传 debugPort')
 })
 
-test('/restart-cdp: 显式给 debugPort 才开 CDP', async () => {
-  const calls = []
+test('/restart-cdp: 非法端口给 400', async () => {
+  let called = 0
   const routes = makeManageRoutes({
     pool,
     client: {},
     settings: {},
     log: () => {},
-    requestRestart: async (options) => calls.push(options),
+    buildRestartCommand: () => { called += 1; return { command: 'x', port: null, note: '' } },
   })
   const res = await call(routes, '/api/zcode-start-plan/restart-cdp', {
     method: 'POST',
-    body: { debugPort: 9333, confirm: true },
-  })
-  assert.equal(res.status, 200)
-  assert.equal(res.body.debugPort, 9333)
-  assert.equal(calls[0].debugPort, 9333)
-})
-
-test('/restart-cdp: 非法端口给 400，且不触发重启', async () => {
-  const calls = []
-  const routes = makeManageRoutes({
-    pool,
-    client: {},
-    settings: {},
-    log: () => {},
-    requestRestart: async (options) => calls.push(options),
-  })
-  const res = await call(routes, '/api/zcode-start-plan/restart-cdp', {
-    method: 'POST',
-    body: { debugPort: 99999, confirm: true },
+    body: { debugPort: 99999 },
   })
   assert.equal(res.status, 400)
-  assert.equal(calls.length, 0, '参数不合法时绝不能真的去重启宿主')
+  assert.equal(called, 0)
 })
 
-test('/restart-cdp: 宿主没提供重启实现时给 501（而不是假装成功）', async () => {
+test('/restart-cdp: 宿主没提供命令生成实现时给 501（而不是假装成功）', async () => {
   const routes = makeManageRoutes({ pool, client: {}, settings: {}, log: () => {} })
-  const res = await call(routes, '/api/zcode-start-plan/restart-cdp', { method: 'POST', body: { confirm: true } })
+  const res = await call(routes, '/api/zcode-start-plan/restart-cdp', { method: 'POST', body: {} })
   assert.equal(res.status, 501)
-  assert.match(res.body.error, /不支持自动重启/)
+  assert.match(res.body.error, /重启指引不可用/)
 })
 
-test('/restart-cdp: 重启实现抛错时把原因透出来', async () => {
+test('/restart-cdp: 命令生成抛错时把原因透出来', async () => {
   const routes = makeManageRoutes({
     pool,
     client: {},
     settings: {},
     log: () => {},
-    requestRestart: async () => {
+    buildRestartCommand: () => {
       throw new Error('找不到 DeepSeek Harness.exe')
     },
   })
-  const res = await call(routes, '/api/zcode-start-plan/restart-cdp', { method: 'POST', body: { confirm: true } })
+  const res = await call(routes, '/api/zcode-start-plan/restart-cdp', { method: 'POST', body: { debugPort: 9229 } })
   assert.equal(res.status, 500)
   assert.match(res.body.error, /找不到/)
 })
