@@ -34,10 +34,21 @@ for (const name of REQUIRED_HOST_PACKAGES) {
 
 for (const [name, range] of Object.entries(peers)) {
   if (!name.startsWith('@deepseek-ai/dsh-')) continue
-  /** prerelease 陷阱：区间里没有 prerelease 段时，rc 版会被判为不满足。 */
+  /**
+   * prerelease 陷阱：区间里没有与宿主 `major.minor.patch` 元组一致的 prerelease
+   * 比较符时，rc / alpha 版会被判为不满足 —— 而且 `^0.2.1-rc.3` 这类写法还会漏掉
+   * 下一个元组（`0.2.2-rc.1` 不满足它）。正确写法是按元组列出显式 prerelease 分支，
+   * 例如 `>=0.2.1-alpha.1 <0.2.2 || >=0.2.2-0 <0.3.0-0`。
+   */
+  const tuples = [...range.matchAll(/(\d+\.\d+\.\d+)-[0-9A-Za-z.-]+/g)]
   if (/^\^?\d+\.\d+\.\d+$/.test(range)) {
     notes.push(
-      `${name}: "${range}" 不含 prerelease 段；若宿主是 0.x 的 rc 版本会被判不兼容（建议写成 "^0.2.1-rc.3" 这类）`,
+      `${name}: "${range}" 不含 prerelease 段；若宿主是 0.x 的 rc / alpha 版本会被判不兼容`,
+    )
+  } else if (tuples.length === 1) {
+    notes.push(
+      `${name}: "${range}" 只覆盖了 ${tuples[0][1]} 这一个元组；下一个元组的预发布版` +
+        `（如 0.2.2-rc.1）会被漏掉，建议改成按元组分列的 || 形式`,
     )
   }
 }

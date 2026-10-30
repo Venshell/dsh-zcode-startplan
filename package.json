@@ -57,7 +57,7 @@
     "probe": "node bin/cli.mjs probe"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-llm": "^0.2.1-rc.3"
+    "@deepseek-ai/dsh-llm": ">=0.2.1-alpha.1 <0.2.2 || >=0.2.2-0 <0.3.0-0"
   },
   "engines": {
     "node": "^22.19 || >=24"
