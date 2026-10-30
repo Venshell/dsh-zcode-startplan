@@ -550,7 +550,14 @@ window.__ModuleLoader__.load({
                * 它只会让人填错、填过期的 id，然后白烧一次 captcha。
                */
               const plans = Array.isArray(slot.plans) ? slot.plans : []
-              const planId = plans[0]?.planId
+              /**
+               * ⚠ 服务端领取成功后不再投放该活动（deliveries 变空）⇒ 已领账号靠
+               * `billing/balance` 的领取记录补显（claimed: true）。一视同仁：
+               * 每个账号都显示全部已知活动，只是已领的没有领取按钮。
+               */
+              const claimable = plans.find((plan) => plan.claimed !== true)
+              const planId = claimable?.planId ?? plans[0]?.planId
+              const allClaimed = plans.length > 0 && claimable === undefined
               return h(
                 'div',
                 { key: account.id, className: 'zsp-row', style: { alignItems: 'flex-start' } },
@@ -564,6 +571,9 @@ window.__ModuleLoader__.load({
                     : plans.length > 1
                       ? h('span', { className: 'zsp-muted' }, `等 ${plans.length} 个活动`)
                       : null,
+                  allClaimed && slot.loading !== true
+                    ? h('span', { className: 'zsp-muted' }, '已领取')
+                    : null,
                   slot.loading === true
                     ? h('span', { className: 'zsp-muted' }, '领取中…（captcha 失败会自动重试一次）')
                     : slot.error !== undefined
@@ -593,10 +603,12 @@ window.__ModuleLoader__.load({
                     {
                       className: 'zsp-btn',
                       onClick: () => void claim(account.id),
-                      disabled: busy || slot.loading === true || slot.probing === true || planId === undefined,
-                      title: planId === undefined ? '当前没有探测到可领取的活动' : `领取 ${planId}`,
+                      disabled: busy || slot.loading === true || slot.probing === true || claimable === undefined,
+                      title: claimable === undefined
+                        ? (allClaimed ? '该账号已领取全部已知活动' : '当前没有探测到可领取的活动')
+                        : `领取 ${claimable.planId}`,
                     },
-                    slot.loading === true ? '领取中…' : '领取',
+                    slot.loading === true ? '领取中…' : allClaimed ? '已领取' : '领取',
                   ),
                 ),
               )
