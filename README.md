@@ -215,6 +215,47 @@ node bin/cli.mjs captcha     # 打印「调试端口可达 / 不可达」与产�
 node bin/cli.mjs probe       # 真发一条最小请求，验证「选号 → captcha → 首帧」全链路
 ```
 
+## 本地 OpenAI 兼容端点（0.9.0）
+
+让任意 OpenAI 兼容客户端（Codex / Cline / Continue / 自写脚本）直接用账号池额度。
+
+```yaml
+# cordis.patch.yml
+openaiGateway:
+  enabled: true      # 默认 false
+  port: 17900        # 默认 17900；0 = 随机
+```
+
+拿到 apiKey（首次启动自动生成，形态 43 位 base64url）：
+
+```powershell
+Get-Content "$env:USERPROFILE\.dsh\zcode-start-plan\openai-api-key"
+# 或改用环境变量 DSH_OPENAI_GATEWAY_API_KEY（优先于文件）
+```
+
+客户端填：
+
+| 项 | 值 |
+|---|---|
+| baseURL | `http://127.0.0.1:17900/v1` |
+| apiKey | 上面那个 key |
+| model | `GLM-5.3` / `GLM-5.3-Flash`（`GET /v1/models` 可取全部） |
+
+验证：
+
+```bash
+curl http://127.0.0.1:17900/health                      # 免 key
+curl http://127.0.0.1:17900/v1/models -H "Authorization: Bearer $KEY"
+curl http://127.0.0.1:17900/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"model":"GLM-5.3-Flash","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+⚠ 与 `endpoint`（Anthropic 格式 `/v1/messages`）是**两个并列出口**，可同时开启；
+两者都走同一个 `planClient.call()` —— 账号池、换号、captcha、限流全部复用。
+
+⚠ 只监听 `127.0.0.1`（loopback）。要跨机器访问请自备隧道（SSH 端口转发），
+本插件不做局域网暴露。
 ## 额度与切号
 
 - 免费额度按**自然日**（UTC+8）结算；用尽的账号标记到当日 24:00 自动恢复

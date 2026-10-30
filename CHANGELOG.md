@@ -3,6 +3,68 @@
 本文件记录**每次修复背后的宿主契约**。只看 diff 看不出「为什么不能改回去」，
 所以把约束与症状一起写下来。
 
+## 0.9.0 — 本地 OpenAI 兼容端点（`/v1/chat/completions`）
+
+### 需求
+
+「支持 openai 格式吗？」——此前**不支持**：本地只有 Anthropic 格式的 `/v1/messages`。
+现在新增 `lib/openai-gateway.js`，与它**并列**（可同时开启），共用同一个
+`planClient.call()`（账号池、换号、captcha、限流全部复用）。
+
+### 用法
+
+```yaml
+# cordis.patch.yml
+openaiGateway:
+  enabled: true
+  port: 17900
+```
+
+```bash
+curl http://127.0.0.1:17900/v1/chat/completions \
+  -H "Authorization: Bearer <~/.dsh/zcode-start-plan/openai-api-key 的内容>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"GLM-5.3-Flash","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+任何 OpenAI 兼容客户端（Codex / Cline / Continue）填 `baseURL = http://127.0.0.1:17900/v1` +
+该 key 即可。端点：`GET /v1/models`、`POST /v1/chat/completions`、`GET /health`（免 key）。
+
+### 对齐参考实现（deepseek-harness-codearts 的 `openai-gateway/`）
+
+| 坑 | 症状 | 对策 |
+|---|---|---|
+| `typeof x === 'string'` vs `!== undefined` | 真实 SSE 里 `content` 与 `reasoning_content` **另一侧恒为 null** ⇒ 首帧 `Cannot read properties of null` | 一律 `typeof` 判断 |
+| 孤儿 `tool` 结果 | 上游 400，而坏历史每轮原样重放 ⇒ **会话永久报废** | 发请求前剔除配对已坏的结果 |
+| 同 id 既有好又有坏调用 | 只看 dropped 会删掉好调用的回执 ⇒ 留下孤儿 tool-call | 剔除条件 `dropped && !kept` |
+| 分片带空 `function.name` | 清空已解析工具名 ⇒ `unknown tool ""` | 只接受非空覆盖 |
+| 空 assistant（调用被剔光） | 变 wire 上的空开头发言 ⇒ 上游 `model_param_invalid` | 整条剔除；**正文非空的保留** |
+| 上游 `{status:200}` 表业务失败 | 「额度用尽」被客户端读成**成功** | 状态码门禁 400–599 |
+| 流缺 `finish` | 半截输出被当完整结果持久化 | 报错而非假装成功 |
+
+**实现期自己踩到并修掉的 bug**：`result.decoder` 是
+`{ read(): Promise<{done, value?}> }`（plan-client.js 的返回类型注释），**不是**异步
+生成器。误当生成器 `for await` 消费 → `read is not a function` → 被 catch 兜住后只发
+一帧 error chunk，表现为「流式只有一个 reasoning 帧就断了」。已加回归测试用**真实
+decoder 形状**驱动整条 HTTP 路径。
+
+### apiKey 策略
+
+- 默认持久化在 `dataDir/openai-api-key`，形态固定 `randomBytes(32).toString('base64url')`
+  （定长 43 位 `[A-Za-z0-9_-]`）；
+- 支持 `DSH_OPENAI_GATEWAY_API_KEY` 环境变量（优先）；
+- ⚠ **文件内容异常时报错而不是静默换 key** —— 静默换会让所有已配置客户端同时 401，
+  而用户只看到 "unauthorized"，无从判断是自己粘错了哪一位还是服务端变了。
+
+### 硬约束
+
+| 约束 | 原因 |
+|---|---|
+| 日志与错误里永不打印 apiKey | 它会被贴进配置文件和 bug 报告 |
+| `/health` 不校验 key | 探活工具不该持有凭据 |
+| `tool_choice` 只支持 auto / none | 其余取值 DSH 侧表达不出来，静默降级会让客户端误以为约束生效 |
+| 工具名判据只有一份（trim 后非空） | 预扫与主转换各写一遍会静默漂移 |
+| 工具 id 判据**不 trim** | id 是不透明标识符，trim 会让配对找错对象 |
 ## 0.8.0 — 领取链路对齐参考实现（版本门控 + 双来源 + 转发头逐字对齐）
 
 ### 来源（用户指路）

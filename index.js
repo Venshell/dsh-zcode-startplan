@@ -111,6 +111,21 @@ const DEFAULT_CONFIG = Object.freeze({
     port: 17_899,
   }),
   /**
+   * 本地 **OpenAI 兼容端点**（0.9.0）：`/v1/chat/completions` + `/v1/models`。
+   *
+   * 让任意 OpenAI 兼容客户端（Codex / Cline / Continue / 自写脚本）用
+   * `baseURL = http://127.0.0.1:<port>/v1` + 插件生成的 apiKey 消耗账号池额度。
+   * 与 `endpoint`（Anthropic 格式）是**并列的两个出口**，可同时开。
+   *
+   * ⚠ 默认可写：apiKey 持久化在 dataDir 的 `openai-api-key`（形态固定为
+   * `randomBytes(32).toString('base64url')`），文件损坏时**报错而不静默换 key**
+   * —— 静默换会让所有已配置的客户端突然 401 且用户无从判断。
+   */
+  openaiGateway: Object.freeze({
+    enabled: false,
+    port: 17_900,
+  }),
+  /**
    * 自动领取营销活动（0.6.0）。
    *
    * 开启后定时扫 `/api/v1/marketing/touch`（官方活动发现端点，GET、零 captcha）；
@@ -139,6 +154,7 @@ export function resolveConfig(raw) {
   const out = { ...DEFAULT_CONFIG, ...src }
   out.captcha = { ...DEFAULT_CONFIG.captcha, ...(src.captcha ?? {}) }
   out.endpoint = { ...DEFAULT_CONFIG.endpoint, ...(src.endpoint ?? {}) }
+  out.openaiGateway = { ...DEFAULT_CONFIG.openaiGateway, ...(src.openaiGateway ?? {}) }
   out.autoClaim = { ...DEFAULT_CONFIG.autoClaim, ...(src.autoClaim ?? {}) }
   if (src.models === undefined || src.models === null) out.models = [...DEFAULT_CONFIG.models]
   else if (Array.isArray(src.models)) out.models = src.models.length > 0 ? src.models.slice() : [...DEFAULT_CONFIG.models]
@@ -255,6 +271,16 @@ export function validateConfig(value) {
     throw new Error('config.endpoint.port 必须是 0-65535 的整数')
   }
   if (typeof endpoint.enabled !== 'boolean') throw new Error('config.endpoint.enabled 必须是布尔值')
+  const openaiGateway = out.openaiGateway
+  if (typeof openaiGateway !== 'object' || openaiGateway === null) {
+    throw new Error('config.openaiGateway 必须是对象')
+  }
+  if (!Number.isInteger(openaiGateway.port) || openaiGateway.port < 0 || openaiGateway.port > 65_535) {
+    throw new Error('config.openaiGateway.port 必须是 0-65535 的整数')
+  }
+  if (typeof openaiGateway.enabled !== 'boolean') {
+    throw new Error('config.openaiGateway.enabled 必须是布尔值')
+  }
   if (typeof out.autoClaim !== 'object' || out.autoClaim === null) throw new Error('config.autoClaim 必须是对象')
   if (typeof out.autoClaim.enabled !== 'boolean') throw new Error('config.autoClaim.enabled 必须是布尔值')
   if (!Number.isInteger(out.autoClaim.intervalMs) || out.autoClaim.intervalMs < 5 * 60_000) {
@@ -276,6 +302,7 @@ export const Config = makeConfigSchema(validateConfig, {
   channel: 'cn',
   captcha: { mode: 'cdp', debugPort: 9229, origin: 'https://zcode.z.ai/' },
   endpoint: { enabled: false, port: 17_899 },
+  openaiGateway: { enabled: false, port: 17_900 },
   autoClaim: { enabled: false, intervalMs: 30 * 60_000 },
   statusTool: true,
 })
