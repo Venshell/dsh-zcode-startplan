@@ -137,9 +137,10 @@ window.__ModuleLoader__.load({
     /**
      * 开关（iOS 风格）：「模型列表里显示这一栏」的每栏右侧开关。
      * checked = 显示；原生 checkbox 保证可访问性（键盘/读屏）。
+     * `label` 覆盖 aria-label（自动领取拨盘用它，不然读屏会念成「模型列表」）。
      */
     function Toggle(props) {
-      const { checked, disabled, onChange } = props
+      const { checked, disabled, onChange, label } = props
       return h(
         'label',
         { className: 'zsp-toggle' },
@@ -147,7 +148,7 @@ window.__ModuleLoader__.load({
           type: 'checkbox',
           checked: checked === true,
           disabled,
-          'aria-label': '在模型列表中显示这一栏',
+          'aria-label': label ?? '在模型列表中显示这一栏',
           onChange: (event) => onChange(event.target.checked),
         }),
         h('span', { className: 'zsp-toggle-track', 'aria-hidden': 'true' }),
@@ -338,11 +339,12 @@ window.__ModuleLoader__.load({
      * CDN 首轮抖动是常态）。这里是「按两次才领到」的服务端侧对策。
      */
     function ClaimSection(props) {
-      const { accounts, busy, onClaimed, captcha } = props
+      const { accounts, busy, onClaimed, captcha, autoClaim, onToggleAutoClaim } = props
       /** accountId → { planId, loading, results, error } */
       const [state, setState] = useState({})
       const [open, setOpen] = useState(false)
       const [restarting, setRestarting] = useState(false)
+      const [togglingAuto, setTogglingAuto] = useState(false)
 
       const patch = (id, next) => setState((prev) => ({ ...prev, [id]: { ...prev[id], ...next } }))
 
@@ -350,7 +352,7 @@ window.__ModuleLoader__.load({
         async (id) => {
           const planId = (state[id]?.planId ?? '').trim()
           if (planId.length === 0) {
-            patch(id, { error: '请先填 plan_id（点「探测活动」自动填，或从活动页抄）' })
+            patch(id, { error: '请先点「探测」自动填 plan_id（或从活动页抄）' })
             return
           }
           patch(id, { loading: true, error: undefined, results: undefined })
@@ -367,9 +369,9 @@ window.__ModuleLoader__.load({
       )
 
       /**
-       * 探测活动（0.6.0）：调 /claimable（官方 marketing/touch 发现端点，GET、
-       * 零 captcha），把找到的 plan_id 自动填进输入框。多个活动时填第一个
-       * （priority 最高的），其余显示在提示里。
+       * 探测活动：调 /claimable（官方 marketing/touch 发现端点，GET、零 captcha），
+       * 把找到的 plan_id 自动填进输入框。多个活动时填第一个（priority 最高的），
+       * 其余显示在提示里。**这是自动的**，与「自动领取」开关无关。
        */
       const probe = useCallback(
         async (id) => {
@@ -396,6 +398,29 @@ window.__ModuleLoader__.load({
         },
         [],
       )
+
+      /**
+       * 展开时自动探测一次（探测零成本：GET、不烧 captcha）。
+       * ⚠ effect 依赖 `open` 与 `accounts`；已探测过的账号跳过，避免反复请求投放端点。
+       */
+      useEffect(() => {
+        if (open !== true) return
+        for (const account of accounts) {
+          if (state[account.id] !== undefined) continue
+          void probe(account.id)
+        }
+      }, [open, accounts, probe, state])
+
+      /** 自动领取开关（拨盘）：写入宿主 settings，重启后保持。 */
+      const toggleAutoClaim = useCallback(async () => {
+        if (typeof onToggleAutoClaim !== 'function') return
+        setTogglingAuto(true)
+        try {
+          await onToggleAutoClaim(autoClaim?.enabled !== true)
+        } finally {
+          setTogglingAuto(false)
+        }
+      }, [autoClaim, onToggleAutoClaim])
 
       /**
        * ⚠ 所有 hooks 必须在任何早退之前调用。
@@ -453,6 +478,31 @@ window.__ModuleLoader__.load({
             'button',
             { className: 'zsp-btn', onClick: () => setOpen((prev) => !prev), disabled: busy },
             open ? '收起' : '领取',
+          ),
+        ),
+        /**
+         * 自动领取拨盘：**探测永远自动**，领取是可开关项。
+         * 开启 = 定时探测到新活动就自动领取（花掉活动资格 + 一次 captcha）。
+         */
+        h(
+          'div',
+          { className: 'zsp-row', style: { alignItems: 'center' } },
+          h(Toggle, {
+            checked: autoClaim?.enabled === true,
+            disabled: busy || togglingAuto,
+            onChange: () => void toggleAutoClaim(),
+            label: '自动领取',
+          }),
+          h(
+            'span',
+            { className: 'zsp-muted' },
+            autoClaim?.enabled === true
+              ? `已开启：定时探测，发现新活动自动领取${
+                  Number.isFinite(autoClaim?.seenCount) && autoClaim.seenCount > 0
+                    ? `（已记录 ${autoClaim.seenCount} 个活动，不会重复领）`
+                    : ''
+                }`
+              : '关闭中：探测仍是自动的（展开即填 plan_id），领取需手动点',
           ),
         ),
         state.__restart !== undefined ? h('span', { className: 'zsp-muted' }, state.__restart) : null,
@@ -1019,7 +1069,24 @@ window.__ModuleLoader__.load({
               )
             : null,
         ),
-        h(ClaimSection, { accounts, busy, onClaimed: () => load(), captcha: data?.captcha }),
+        h(ClaimSection, {
+          accounts,
+          busy,
+          onClaimed: () => load(),
+          captcha: data?.captcha,
+          autoClaim: data?.autoClaim,
+          /**
+           * 自动领取拨盘：写入宿主（持久化 settings.json）后重新拉 summary，
+           * 让拨盘状态与服务端观测（seenCount）保持同源。
+           */
+          onToggleAutoClaim: async (enabled) => {
+            try {
+              await api('/auto-claim', { enabled })
+            } finally {
+              await load()
+            }
+          },
+        }),
         data !== undefined && data.storeInMemory === true
           ? h(
               'span',

@@ -219,11 +219,15 @@ node bin/cli.mjs probe       # 真发一条最小请求，验证「选号 → ca
 node bin/cli.mjs claim        # 探测活动（marketing/touch）→ 逐个领取（每个 plan 单独 captcha）
 ```
 
-**活动探测（0.6.0）**：plan_id 不需要手抄——官方把它写在营销投放
-（`GET /api/v1/marketing/touch`）按钮的 `claim_zcode_plan` action 里，
-CLI `claim` 与面板「探测」按钮都会自动发现（GET、零 captcha）。
-面板里也可以开启 `config.autoClaim` 让插件定时探测并自动领取
-（`0`/`1003`/`1005` 记入已领集合，绝不重复烧 captcha）。
+**活动探测（自动）**：plan_id 不需要手抄——官方把它写在营销投放
+（`GET /api/v1/marketing/touch`）按钮的 `claim_zcode_plan` action 里。
+CLI `claim` 与面板展开时都会**自动探测**（GET、零 captcha、不消耗任何资源）。
+
+**自动领取（开关项，0.6.1）**：领取要花掉活动资格 + 一次设备 captcha，
+所以由面板顶部的「自动领取」拨盘控制（默认关）——
+开启后插件定时探测，发现新活动自动领取，`0`/`1003`/`1005` 记入已领集合，
+**绝不重复烧 captcha**。拨盘位置存 `settings.json`，重启后保持；
+配置文件里的 `config.autoClaim.enabled` 只作为首次启动的默认值。
 
 `1003`（已领取过）按**幂等成功**处理。
 
@@ -249,7 +253,7 @@ CLI `claim` 与面板「探测」按钮都会自动发现（GET、零 captcha）
           enabled: false                # true 才起本地 Anthropic 端点（仅 llm-pi-ai 回落路线）
           port: 17899
         autoClaim:
-          enabled: false                # true = 定时探测活动并自动领取（终态码记集合，不重复烧 captcha）
+          enabled: false                # 首次启动的默认值；之后以面板拨盘（settings.json）为准
           intervalMs: 1800000           # 扫描间隔，下限 300000（5 分钟）
         statusTool: true
 ```

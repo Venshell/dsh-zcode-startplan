@@ -97,6 +97,9 @@ function fakePool(credentials = [{ id: 'acct-a', credential: CREDENTIAL }]) {
   }
 }
 
+/** 开关语义：探测永远自动，**领取是开关项**（用例验证领取侧，故显式开启）。 */
+const enabled = (extra) => ({ enabled: true, ...extra })
+
 function withStateDir(fn) {
   return async () => {
     const dir = mkdtempSync(join(tmpdir(), 'zsp-auto-claim-'))
@@ -108,12 +111,46 @@ function withStateDir(fn) {
   }
 }
 
+test('autoClaim: 默认关闭 —— tick 空转，绝不代替用户领取；拨盘即时生效', withStateDir(async (dir) => {
+  const stateFile = join(dir, 'auto-claim-state.json')
+  const pool = fakePool()
+  let minted = 0
+  let claimed = 0
+  let scanned = 0
+  const autoClaim = createAutoClaim({
+    pool,
+    client: { mintCaptcha: async () => { minted += 1; return { param: 'p', region: 'cn' } } },
+    fetchClaimablePlans: async () => { scanned += 1; return [{ planId: 'plan-a' }] },
+    claimPlan: async () => { claimed += 1; return { ok: true, code: 0 } },
+    stateFile,
+  })
+
+  assert.equal(autoClaim.isEnabled(), false, '未显式开启 = 关')
+  assert.deepEqual(await autoClaim.tick(), [], '关闭时 tick 不扫、不领')
+  assert.equal(scanned, 0, '关闭时连探测都不做（探测由面板/CLI 触发）')
+  assert.equal(minted, 0, '绝不烧 captcha')
+  assert.equal(claimed, 0)
+
+  /** 打开后立即生效（无需重启）；已领集合从空开始正常记录。 */
+  assert.equal(autoClaim.setEnabled(true), true)
+  await autoClaim.tick()
+  assert.equal(claimed, 1, '开启后才真正领取')
+  assert.equal(autoClaim.stats().enabled, true)
+
+  /** 再关掉：记录保留，不再新增。 */
+  assert.equal(autoClaim.setEnabled(false), false)
+  assert.deepEqual(await autoClaim.tick(), [])
+  assert.equal(claimed, 1)
+  assert.equal(autoClaim.stats().seenCount, 1, '关掉不清历史记录')
+  assert.equal(autoClaim.stats().enabled, false)
+}))
+
 test('autoClaim: 发现新 planId 才烧 captcha；终态码记 seen 不再重试', withStateDir(async (dir) => {
   const stateFile = join(dir, 'auto-claim-state.json')
   const pool = fakePool()
   const mints = []
   const claims = []
-  const autoClaim = createAutoClaim({
+  const autoClaim = createAutoClaim(enabled({
     pool,
     client: { mintCaptcha: async () => { mints.push(1); return { param: `p-${mints.length}`, region: 'cn' } } },
     fetchClaimablePlans: async () => [{ planId: 'plan-a', campaignId: 'camp-1', name: '活动A' }],
@@ -123,7 +160,7 @@ test('autoClaim: 发现新 planId 才烧 captcha；终态码记 seen 不再重�
     },
     stateFile,
     now: () => 1_000,
-  })
+  }))
 
   const first = await autoClaim.tick()
   assert.equal(claims.length, 1)
@@ -141,7 +178,7 @@ test('autoClaim: 非终态码（网络/异常）不记 seen，下轮重试', wit
   const stateFile = join(dir, 'auto-claim-state.json')
   const pool = fakePool()
   let calls = 0
-  const autoClaim = createAutoClaim({
+  const autoClaim = createAutoClaim(enabled({
     pool,
     client: { mintCaptcha: async () => ({ param: 'p', region: 'cn' }) },
     fetchClaimablePlans: async () => [{ planId: 'plan-x' }],
@@ -150,7 +187,7 @@ test('autoClaim: 非终态码（网络/异常）不记 seen，下轮重试', wit
       return { ok: false, code: 999, message: '服务器开小差' }
     },
     stateFile,
-  })
+  }))
   await autoClaim.tick()
   await autoClaim.tick()
   assert.equal(calls, 2, '非终态 → 每轮重试')
@@ -158,13 +195,13 @@ test('autoClaim: 非终态码（网络/异常）不记 seen，下轮重试', wit
 
   /** captcha 失败同样不记 seen。 */
   let mintCalls = 0
-  const failingCaptcha = createAutoClaim({
+  const failingCaptcha = createAutoClaim(enabled({
     pool,
     client: { mintCaptcha: async () => { mintCalls += 1; throw new Error('CDP 不可达') } },
     fetchClaimablePlans: async () => [{ planId: 'plan-y' }],
     claimPlan: async () => { throw new Error('should not be called') },
     stateFile,
-  })
+  }))
   const results = await failingCaptcha.tick()
   assert.equal(results[0].ok, false)
   assert.match(results[0].error, /CDP 不可达/)
@@ -177,7 +214,7 @@ test('autoClaim: 1003（已领过）与 1005（领完）同样入终态', withSt
     { id: 'acct-a', credential: CREDENTIAL },
     { id: 'acct-b', credential: { ...CREDENTIAL, user_id: 'u-2' } },
   ])
-  const autoClaim = createAutoClaim({
+  const autoClaim = createAutoClaim(enabled({
     pool,
     client: { mintCaptcha: async () => ({ param: 'p', region: 'cn' }) },
     fetchClaimablePlans: async (credential) => [
@@ -185,7 +222,7 @@ test('autoClaim: 1003（已领过）与 1005（领完）同样入终态', withSt
     ],
     claimPlan: async (credential) => (credential.user_id === 'u-1' ? { ok: true, code: 1003, alreadyClaimed: true } : { ok: false, code: 1005 }),
     stateFile: join(dir, 'state.json'),
-  })
+  }))
   await autoClaim.tick()
   const seen = autoClaim.seenSnapshot()
   assert.equal(seen['acct-a']['plan-claimed'].code, 1003)
@@ -208,13 +245,13 @@ test('autoClaim: 状态文件坏 / 版本不识别 → 空状态起跑；禁用�
     { id: 'acct-off', credential: { ...CREDENTIAL, user_id: 'u-2' }, enabled: false },
   ])
   const probed = []
-  const autoClaim = createAutoClaim({
+  const autoClaim = createAutoClaim(enabled({
     pool,
     client: { mintCaptcha: async () => ({ param: 'p', region: 'cn' }) },
     fetchClaimablePlans: async (credential) => { probed.push(credential.user_id); return [] },
     claimPlan: async () => ({}),
     stateFile,
-  })
+  }))
   await autoClaim.tick()
   assert.deepEqual(probed, ['u-1'], '停用账号不参与扫描')
   /** 父路径是文件 → mkdir 必失败 → 返回 false 而不是抛（轮询链路绝不能崩）。 */

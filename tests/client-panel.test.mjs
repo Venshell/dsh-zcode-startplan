@@ -109,7 +109,7 @@ function buildPanel() {
   const code = `
     const h = React.createElement
     const Fragment = React.Fragment
-    const { useState, useCallback } = React
+    const { useState, useCallback, useEffect } = React
     const api = async () => ({ ok: true, plans: [] })
     function NicknameEdit(props) { return h('span', null, props.nickname) }
     function Toggle() { return h('input', { type: 'checkbox' }) }
@@ -353,6 +353,46 @@ test('ClaimSection: captcha 可用时不显示重启按钮', () => {
   const buttons = findAll(tree, (node) => node.type === 'button').map(textOf)
   assert.ok(!buttons.includes('以调试模式重启'), '载体已就绪就不该再提示重启')
   assert.match(textOf(tree), /探测/, '0.6.0 文案：探测自动填 plan_id')
+})
+
+test('ClaimSection: 默认关闭时拨盘说明「探测自动、领取手动」', () => {
+  const panel = buildPanel()
+  const tree = panel.render(
+    panel.ClaimSection({
+      accounts: [{ id: 'a1', index: 1, nickname: 'ACC', enabled: true }],
+      busy: false,
+      captcha: { reachable: true },
+      autoClaim: { enabled: false },
+    }),
+  )
+  const text = textOf(tree)
+  /** 「自动领取」是拨盘的 aria-label（不渲染成可见文字），可见文本是这句说明。 */
+  assert.match(text, /关闭中：探测仍是自动的/, '关闭时说明探测仍自动、领取手动')
+  /** 测试桩把 Toggle 替换成裸 input，所以按 type=checkbox 找拨盘。 */
+  const toggles = findAll(tree, (node) => node.type === 'input' && node.props?.type === 'checkbox')
+  assert.equal(toggles.length, 1, '要有自动领取拨盘')
+})
+
+test('ClaimSection: 自动领取开启时显示已开启与已记录数', () => {
+  const panel = buildPanel()
+  const tree = panel.render(
+    panel.ClaimSection({
+      accounts: [{ id: 'a1', index: 1, nickname: 'ACC', enabled: true }],
+      busy: false,
+      captcha: { reachable: true },
+      autoClaim: { enabled: true, seenCount: 3 },
+    }),
+  )
+  const text = textOf(tree)
+  assert.match(text, /已开启/)
+  assert.match(text, /已记录 3 个活动/, '把 seenCount 透出，用户能看出「不会重复领」')
+})
+
+test('ClaimSection 源码：展开时自动探测（useEffect + /claimable），探测零成本', () => {
+  const claimSectionSrc = extractFunction('ClaimSection')
+  assert.match(claimSectionSrc, /useEffect\(/, '展开即自动探测（不需要用户点按钮）')
+  assert.match(claimSectionSrc, /\/claimable/, '探测走官方发现端点')
+  assert.match(claimSectionSrc, /onToggleAutoClaim/, '拨盘要能把开关写回宿主')
 })
 
 /**
