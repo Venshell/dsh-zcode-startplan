@@ -352,27 +352,6 @@ window.__ModuleLoader__.load({
 
       const patch = (id, next) => setState((prev) => ({ ...prev, [id]: { ...prev[id], ...next } }))
 
-      const claim = useCallback(
-        async (id) => {
-          /** plan_id 只来自探测结果 —— 没有手输路径（见渲染处注释）。 */
-          const planId = state[id]?.plans?.[0]?.planId
-          if (typeof planId !== 'string' || planId.length === 0) {
-            patch(id, { error: '当前没有探测到可领取的活动' })
-            return
-          }
-          patch(id, { loading: true, error: undefined, results: undefined })
-          try {
-            const data = await api('/claim', { id, planId })
-            patch(id, { loading: false, results: Array.isArray(data.results) ? data.results : [] })
-            /** 领取会改变余额（或生成 pending），刷新面板让进度条同步。 */
-            if (typeof onClaimed === 'function') await onClaimed()
-          } catch (caught) {
-            patch(id, { loading: false, error: caught instanceof Error ? caught.message : String(caught) })
-          }
-        },
-        [onClaimed, state],
-      )
-
       /**
        * 探测活动：调 /claimable（官方 marketing/touch 发现端点，GET、零 captcha）。
        * **自动执行**（展开即探），结果存进 state 供渲染与领取使用。
@@ -396,6 +375,27 @@ window.__ModuleLoader__.load({
           }
         },
         [],
+      )
+
+      const claim = useCallback(
+        async (id) => {
+          /** plan_id 只来自探测结果 —— 没有手输路径（见渲染处注释）。 */
+          const planId = state[id]?.plans?.[0]?.planId
+          if (typeof planId !== 'string' || planId.length === 0) {
+            patch(id, { error: '当前没有探测到可领取的活动' })
+            return
+          }
+          patch(id, { loading: true, error: undefined, results: undefined })
+          try {
+            const data = await api('/claim', { id, planId })
+            patch(id, { loading: false, results: Array.isArray(data.results) ? data.results : [] })
+            /** 领取会改变余额（或生成 pending），刷新面板让进度条同步。 */
+            if (typeof onClaimed === 'function') await onClaimed()
+          } catch (caught) {
+            patch(id, { loading: false, error: caught instanceof Error ? caught.message : String(caught) })
+          }
+        },
+        [onClaimed, state],
       )
 
       /**
