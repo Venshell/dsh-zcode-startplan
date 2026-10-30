@@ -3,6 +3,65 @@
 本文件记录**每次修复背后的宿主契约**。只看 diff 看不出「为什么不能改回去」，
 所以把约束与症状一起写下来。
 
+## 0.6.3 — 修好重启脚本（对照 DSH 官方 app.relaunch 语义）+ 重启二次确认
+
+### 症状
+
+面板「以调试模式重启」永远失败：宿主被杀掉又原样起来（不带 CDP 端口），
+`captcha.reachable` 仍是 false；有时甚至把宿主搞成半死状态。
+
+### 根因（实测进程树 + app.asar 反编译，不是推测）
+
+**官方重启长什么样**（`D:\software\dsh\resources\app.asar`）：
+
+```js
+// 恢复面板的 restart / 菜单项
+restart: () => { app.relaunch(); quitWithoutConfirmation(); }
+// quitWithoutConfirmation 仅置 skipQuitConfirmation = true 后 app.quit()
+```
+
+即：**优雅退出 + 原样重放 argv**。我们没法在插件里调 `app.relaunch()`
+（宿主未把该能力暴露给插件），只能在进程外等效实现 —— 而旧脚本三处都错了：
+
+| # | 旧实现 | 后果 |
+|---|---|---|
+| ① | 主进程判定 `CommandLine -notmatch '--type='` | 把 `DeepSeek Harness.exe --expose-internals … dsh-desktop-host\lib\index.js` 这个 **host 子进程**和 `runner.js` 一起当成主进程；杀完 UI 主进程还在 |
+| ② | 杀完立刻 `Start-Process` | 宿主有 `claimDesktopSingleInstance()` / `requestSingleInstanceLock()`：**第二个实例只会触发 second-instance（聚焦已有窗口）然后自己 quit()，命令行参数完全不生效** → `--remote-debugging-port` 永远带不上 |
+| ③ | `-Force` 秒杀，不确认进程真的消失 | 单实例锁可能仍在，拉起必被吞 |
+
+实测进程树（本机）：主进程 `15828`（命令行只有 exe）、host `28128`
+（`--expose-internals`）、runner `13776/34120`、Chromium 子进程
+（`--type=gpu-process|renderer|utility`）。旧规则会把 `28128/13776` 误判为主进程。
+
+### 修复（0.6.3）
+
+- **`scripts/restart-dsh.ps1` 按 app.relaunch 语义重写**：
+  1. `Test-IsMainProcess`：排除 `--type=` / `dsh-desktop-host` / `runner.js` /
+     `--expose-internals`；多候选时取「不是任何候选子进程」的根（实测唯一命中 `15828`）；
+  2. `Stop-MainProcessGracefully`：先 `CloseMainWindow()`（= 用户点 X，走 before-quit），
+     超时才 `-Force`，**并且无论哪条路径都等到 PID 从进程表消失**；
+  3. 清理残留子进程 → `Wait-PortFree` 确认端口真空出来；
+  4. `Start-Host`：**原 argv + 追加 `--remote-debugging-port`**（等效 relaunch 重放），
+     已有的不重复加；
+  5. `Test-Cdp` 45s 轮询验证；失败则**不带端口**重新拉起（不让用户卡在「应用没了」），
+     并以退出码 2 报告。
+- **重启二次确认（面板 + 服务端）**：
+  - 面板两段式：`以调试模式重启` → `确认重启？会中断任务`（`data-danger` 红色），
+    成功后提示「约 N 秒后可用；**所有正在运行的任务都会中断**」；
+  - 服务端 `POST /restart-cdp` **要求 `body.confirm === true`**，否则 400 并回
+    `{requiresConfirm: true, consequence: 'kills-host-and-interrupts-tasks'}` ——
+    脚本/旧页面/误触都不该悄悄把宿主干掉；
+  - `waitSeconds` 默认从 3 改为 2（只等响应写完，不再赌会话空闲）。
+
+### 硬约束
+
+| 约束 | 原因 |
+|---|---|
+| 主进程判定必须排除 `--expose-internals` 与 `runner.js` | 否则杀错进程，单实例锁不释放 |
+| 拉起前必须**等 PID 消失 + 端口空出** | 单实例锁会让带参数的新实例静默 quit |
+| 新实例必须**重放原 argv** | 等效 `app.relaunch()`；只给 exe 会丢掉用户原有启动参数 |
+| 重启端点必须要求 `confirm: true` | 它会中断所有任务，代价必须显式确认 |
+
 ## 0.6.2 — 移除手工输入 plan_id 的组件
 
 ### 语义

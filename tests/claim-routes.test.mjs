@@ -326,13 +326,36 @@ test('/restart-cdp: 把 debugPort 与等待时长交给重启实现，不阻塞�
   })
   const res = await call(routes, '/api/zcode-start-plan/restart-cdp', {
     method: 'POST',
-    body: { debugPort: 9333, waitSeconds: 5 },
+    body: { debugPort: 9333, waitSeconds: 5, confirm: true },
   })
   assert.equal(res.status, 200)
   assert.equal(res.body.ok, true)
   assert.equal(res.body.debugPort, 9333)
   assert.deepEqual(calls, [{ debugPort: 9333, waitSeconds: 5 }])
   assert.equal(typeof res.body.estimatedReadyMs, 'number')
+})
+
+/**
+ * ⚠ 二次确认（0.6.3）：重启会杀掉整个宿主，**所有正在运行的任务都会中断**。
+ * 面板有两段式按钮，服务端也要求显式 `confirm: true` —— 直接打端点的调用
+ * （脚本 / 旧版页面 / 误触）不该悄悄把宿主干掉。
+ */
+test('/restart-cdp: 没有 confirm:true 一律 400，且绝不触发重启', async () => {
+  const calls = []
+  const routes = makeManageRoutes({
+    pool,
+    client: {},
+    settings: {},
+    log: () => {},
+    requestRestart: async (options) => calls.push(options),
+  })
+  for (const body of [{ debugPort: 9333 }, { debugPort: 9333, confirm: false }, { debugPort: 9333, confirm: 'true' }]) {
+    const res = await call(routes, '/api/zcode-start-plan/restart-cdp', { method: 'POST', body })
+    assert.equal(res.status, 400, `body=${JSON.stringify(body)} 必须被拒`)
+    assert.equal(res.body.requiresConfirm, true)
+    assert.match(res.body.error, /中断/)
+  }
+  assert.equal(calls.length, 0, '未确认时绝不能真的去重启宿主')
 })
 
 test('/restart-cdp: 非法端口给 400，且不触发重启', async () => {
@@ -344,14 +367,17 @@ test('/restart-cdp: 非法端口给 400，且不触发重启', async () => {
     log: () => {},
     requestRestart: async (options) => calls.push(options),
   })
-  const res = await call(routes, '/api/zcode-start-plan/restart-cdp', { method: 'POST', body: { debugPort: 99999 } })
+  const res = await call(routes, '/api/zcode-start-plan/restart-cdp', {
+    method: 'POST',
+    body: { debugPort: 99999, confirm: true },
+  })
   assert.equal(res.status, 400)
   assert.equal(calls.length, 0, '参数不合法时绝不能真的去重启宿主')
 })
 
 test('/restart-cdp: 宿主没提供重启实现时给 501（而不是假装成功）', async () => {
   const routes = makeManageRoutes({ pool, client: {}, settings: {}, log: () => {} })
-  const res = await call(routes, '/api/zcode-start-plan/restart-cdp', { method: 'POST', body: {} })
+  const res = await call(routes, '/api/zcode-start-plan/restart-cdp', { method: 'POST', body: { confirm: true } })
   assert.equal(res.status, 501)
   assert.match(res.body.error, /不支持自动重启/)
 })
@@ -366,7 +392,7 @@ test('/restart-cdp: 重启实现抛错时把原因透出来', async () => {
       throw new Error('找不到 DeepSeek Harness.exe')
     },
   })
-  const res = await call(routes, '/api/zcode-start-plan/restart-cdp', { method: 'POST', body: {} })
+  const res = await call(routes, '/api/zcode-start-plan/restart-cdp', { method: 'POST', body: { confirm: true } })
   assert.equal(res.status, 500)
   assert.match(res.body.error, /找不到/)
 })

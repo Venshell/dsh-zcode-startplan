@@ -346,6 +346,12 @@ window.__ModuleLoader__.load({
       const [state, setState] = useState({})
       const [open, setOpen] = useState(false)
       const [restarting, setRestarting] = useState(false)
+      /**
+       * 重启二次确认（0.6.3）。重启会**杀掉整个宿主进程** —— 所有正在跑的
+       * 任务、未写完的回复都会中断。这条代价必须在点下去之前说清楚，
+       * 所以做成两段式：先「重启」→ 变成「确认重启？会中断任务」，再点才执行。
+       */
+      const [confirmRestart, setConfirmRestart] = useState(false)
       const [togglingAuto, setTogglingAuto] = useState(false)
 
       const patch = (id, next) => setState((prev) => ({ ...prev, [id]: { ...prev[id], ...next } }))
@@ -425,12 +431,16 @@ window.__ModuleLoader__.load({
        * → React 抛 Rendered fewer hooks than expected → 整个面板白屏。
        */
       const restart = useCallback(async () => {
+        setConfirmRestart(false)
         setRestarting(true)
         try {
-          await api('/restart-cdp', { debugPort: captcha?.debugPort ?? 9229 })
+          /** `confirm: true` 是服务端要求的二次确认（重启会中断所有任务）。 */
+          const data = await api('/restart-cdp', { debugPort: captcha?.debugPort ?? 9229, confirm: true })
           setState((prev) => ({
             ...prev,
-            __restart: '即将以调试模式重启，窗口会关闭并自动重新打开；稍后在浏览器里刷新本页面。',
+            __restart:
+              `已请求重启（约 ${Math.round((data?.estimatedReadyMs ?? 20_000) / 1000)} 秒后可用）。` +
+              '**所有正在运行的任务都会中断**，窗口关闭后会自动重开；稍后在浏览器里刷新本页面。',
           }))
         } catch (caught) {
           setState((prev) => ({ ...prev, __restart: `重启失败：${caught instanceof Error ? caught.message : String(caught)}` }))
@@ -461,16 +471,30 @@ window.__ModuleLoader__.load({
           h('span', { className: 'zsp-spacer' }),
           captchaReachable
             ? null
-            : h(
-                'button',
-                {
-                  className: 'zsp-btn',
-                  onClick: () => void restart(),
-                  disabled: busy || restarting,
-                  title: captchaReason ?? '以 --remote-debugging-port 重启宿主',
-                },
-                restarting ? '重启中…' : '以调试模式重启',
-              ),
+            : confirmRestart === true
+              ? h(
+                  'button',
+                  {
+                    className: 'zsp-btn',
+                    'data-danger': 'true',
+                    onClick: () => void restart(),
+                    disabled: busy || restarting,
+                    title: '重启会关闭整个宿主；所有正在运行的任务都会被中断',
+                  },
+                  restarting ? '重启中…' : '确认重启？会中断任务',
+                )
+              : h(
+                  'button',
+                  {
+                    className: 'zsp-btn',
+                    onClick: () => setConfirmRestart(true),
+                    disabled: busy || restarting,
+                    title:
+                      `${captchaReason ?? '以 --remote-debugging-port 重启宿主'}。` +
+                      '⚠ 重启会中断所有正在运行的任务。',
+                  },
+                  '以调试模式重启',
+                ),
           h(
             'button',
             { className: 'zsp-btn', onClick: () => setOpen((prev) => !prev), disabled: busy },

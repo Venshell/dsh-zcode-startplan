@@ -185,8 +185,10 @@ renderer 里挂一个**离屏隐藏 iframe**（`opacity:0`、`pointer-events:non
 打包态默认**不开**调试端口。三种开启方式，任选其一：
 
 1. **面板按钮（最省事）**：插件详情页的「赠送额度」区，captcha 不可用时会直接出现
-   **「以调试模式重启」**，点一下 → 宿主带参数自动重开；脚本带失败回退
-   （CDP 起不来就不带参数重启，保证宿主仍可用）；
+   **「以调试模式重启」**，点一下变 **「确认重启？会中断任务」**，再点才执行 →
+   宿主带参数自动重开。⚠ **重启会中断所有正在运行的任务**（它会杀掉整个宿主进程），
+   所以按钮是两段式确认；服务端也要求 `confirm: true`。
+   脚本带失败回退（CDP 起不来就不带参数重启，保证宿主仍可用）；
 2. 手动启动一次：
 
    ```powershell
@@ -483,7 +485,7 @@ EOF flush）、**宿主 `BlockAssembler` 契约级复刻**、Anthropic→DSH 流
 | `lib/pool.js` | SQLite 账号库 + 账号池 |
 | `lib/local-endpoint.js` | 可选本地 Anthropic 端点（pi-ai 回落路线） |
 | `bin/cli.mjs` | login / list / status / probe / claim / captcha |
-| `scripts/restart-dsh.ps1` | 以 `--remote-debugging-port` 重启宿主（面板按钮的后端；带失败回退） |
+| `scripts/restart-dsh.ps1` | 以 `--remote-debugging-port` 重启宿主（面板按钮的后端）。对照官方 `app.relaunch(); app.quit();` 语义：只杀真主进程、优雅退出并等它消失、原 argv + CDP 参数拉起；带失败回退 |
 
 ## 许可
 

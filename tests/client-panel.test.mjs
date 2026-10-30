@@ -399,6 +399,14 @@ test('ClaimSection 源码：展开时自动探测（useEffect + /claimable），
   assert.match(claimSectionSrc, /onToggleAutoClaim/, '拨盘要能把开关写回宿主')
 })
 
+test('ClaimSection 源码：重启是两段式确认，且明确告知会中断任务', () => {
+  const claimSectionSrc = extractFunction('ClaimSection')
+  assert.match(claimSectionSrc, /confirmRestart/, '重启需要二次确认状态')
+  assert.match(claimSectionSrc, /确认重启？会中断任务/, '确认按钮必须写明后果')
+  assert.match(claimSectionSrc, /confirm: true/, '调用重启端点要带服务端要求的二次确认')
+  assert.match(claimSectionSrc, /中断/, '提示里必须说明重启会中断任务')
+})
+
 /**
  * ⚠ 2026-10-28 语义变更：面板不再「先查 preview 再显示领取按钮」。
  *
