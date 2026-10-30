@@ -629,19 +629,18 @@ POST /api/v1/zcode-plan/billing/claim {plan_id} + captcha 头            ← 真
 ### 合规含义
 
 - Apache-2.0 → GPL-3.0-or-later：FSF 确认单向兼容，无需换许可证；
-- 唯一义务是保留版权与许可声明 —— 已在 README「许可」节建立**五级出处表**
-  （zai-org/ZCode / bonus-plan / plugin-manager / workbuddy / dsh-free-glm），
+- 唯一义务是保留版权与许可声明 —— 已在 README「许可」节建立**四级出处表**
+  （zai-org/ZCode / bonus-plan / plugin-manager / workbuddy），
   逐项写明参考了什么、许可证状态、对我们的约束；
 - `lib/anthropic-body.js` 的常量头部补了同样的出处注释。
 
-### 与 dsh-free-glm 的关系（审计时被问过）
+### 与无往来同源项目的关系（审计时被问过）
 
-同源兄弟项目（双方参考同一个 bonus-plan），**代码零往来**：它走"ZCode 壳内桥接"
-（部署开源 ZCode 实例 + HTTP 桥），本插件走"进程内直连"。它的 README 自述 MIT
-但仓库无 LICENSE 文件 —— 与我们无关，因为我们没有从它那里复制任何内容。
-它声称"裸 HTTP 直连必 3012、走会话链路是唯一解"，与本插件直连成功的事实矛盾；
-合理解释是时间差（其实验集中于 2026-09-28 前后）与设备身份策略差异（它复用壳的
-真实 X-Device-Mid，本插件生成独立 mid + 官方身份块）。双方结论不宜互相套用。
+存在同源兄弟项目（双方参考同一个 bonus-plan），**代码零往来**：它走"ZCode 壳内桥接"
+（部署开源 ZCode 实例 + HTTP 桥），本插件走"进程内直连"。它声称"裸 HTTP 直连必 3012、
+走会话链路是唯一解"，与本插件直连成功的事实矛盾；合理解释是时间差（其实验集中于
+2026-09-28 前后）与设备身份策略差异（它复用壳的真实 X-Device-Mid，本插件生成独立
+mid + 官方身份块）。双方结论不宜互相套用。
 
 ## 0.5.2 — 额度到期时间（绝对时间 + 相对时长）
 

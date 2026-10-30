@@ -30,7 +30,7 @@
    **宿主需带调试端口启动**（面板按钮给出可复制的命令）：
 
    ```powershell
-   & "D:\software\dsh\DeepSeek Harness.exe" --remote-debugging-port=9229
+   & "<DSH 安装路径>\DeepSeek Harness.exe" --remote-debugging-port=9229
    ```
 
    > 调试端口**日常对话不需要**——captcha 按需触发，只有领取是硬性要求。
@@ -74,7 +74,6 @@ CLI：`node bin/cli.mjs login | list | status | probe | claim | captcha`。
 | [bonus-plan-4-open-zcode](https://gitee.com/iJetLi/bonus-plan-4-open-zcode) | 协议事实的原始出处：端点、错误码语义、captcha 时序、身份块是 3012 判据 |
 | [zai-org/ZCode](https://github.com/zai-org/ZCode) | **官方身份块文本**（Apache-2.0，`identity.ts` 逐字） |
 | [deepseek-harness-codearts](https://gitee.com/iJetLi/deepseek-harness-codearts) | **官方端点与风控对策**：版本门控、双来源活动发现、coding-plan 通道（biz API 换 key）、18 个转发头对齐官方抓包、OpenAI 网关的协议陷阱清单 |
-| [MYCF711/dsh-free-glm](https://github.com/MYCF711/dsh-free-glm) | 无代码往来（同源兄弟项目，独立验证出同一身份块结论） |
 
 ## 许可
 
