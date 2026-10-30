@@ -327,34 +327,15 @@ window.__ModuleLoader__.load({
         onBlur: () => setEditing(false),
       })
     }
-
     /**
-     * OpenAI 兼容端点配置区（0.9.3）：开关 + 连接信息 + apiKey 显隐。
-     *
-     * ⚠ 开关只写 settings.json，**重启宿主后生效**（HTTP server 热启停会牵扯
-     * 端口占用，不做运行时切换）—— UI 必须把这点写明白，否则用户拨了开关
-     * 没反应会当成坏了。
-     * ⚠ apiKey 常态只显示尾 4 位；点「显示」才向宿主要全量（宿主只在该次
-     * 请求下发，绝不进 summary）。
+     * OpenAI 兼容端点状态行（0.9.5）：网关常开，鉴权只认分发 key（面板下方生成）。
+     * 这里只显示运行状态与 baseURL；开关保留给「彻底关闭网关」的场景。
      */
     function OpenAiGatewaySection(props) {
       const { gateway, busy, onChanged } = props
-      const [revealed, setRevealed] = useState(false)
       const [toggling, setToggling] = useState(false)
       if (gateway === undefined) return null
       const effectiveOn = gateway.running === true
-
-      const showKey = async () => {
-        try {
-          const response = await fetch(`${API}/openai-gateway?reveal=1`)
-          const data = await response.json().catch(() => ({}))
-          if (response.ok && typeof data?.apiKey === 'string') {
-            setRevealed(data.apiKey)
-          }
-        } catch {
-          // 显示失败就保持掩码，不值得报错。
-        }
-      }
 
       const toggle = async () => {
         setToggling(true)
@@ -377,11 +358,7 @@ window.__ModuleLoader__.load({
           h(
             'span',
             { className: 'zsp-muted', style: { flex: '1 1 auto', minWidth: 0 } },
-            effectiveOn
-              ? `运行中 · ${gateway.baseUrl ?? ''}`
-              : gateway.enabledInSettings === true
-                ? '已开启（重启宿主后生效）'
-                : '未开启：任意 OpenAI 客户端可经此使用账号池额度',
+            effectiveOn ? `运行中 · ${gateway.baseUrl ?? ''}` : '未运行（重启宿主后生效）',
           ),
           h(
             'span',
@@ -389,16 +366,6 @@ window.__ModuleLoader__.load({
             h(Toggle, { checked: gateway.enabledInSettings === true, disabled: busy || toggling, onChange: () => void toggle() }),
           ),
         ),
-        effectiveOn
-          ? h(
-              'div',
-              { className: 'zsp-row', style: { paddingLeft: '18px' } },
-              h('span', { className: 'zsp-muted' }, 'apiKey'),
-              h('code', { className: 'zsp-plan-id', onClick: revealed ? undefined : () => void showKey(), style: { cursor: 'pointer' } },
-                revealed ? revealed : '点击显示'),
-              h('span', { className: 'zsp-muted' }, 'baseURL 就是上面那行（/v1 结尾）'),
-            )
-          : null,
       )
     }
 
