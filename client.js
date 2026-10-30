@@ -656,15 +656,27 @@ window.__ModuleLoader__.load({
                   React.Fragment,
                   null,
                   /**
-                   * 已生效额度一条、每个未生效的领取包各一条——形状完全相同，
-                   * 未生效的用条纹 + 底部「X 起可用」区分。
+                   * 额度桶**逐个**画条（0.6.8）：不同桶到期时间不同，
+                   * 汇总条只会显示最早的那个，其余被吞掉。
+                   * 单桶时与旧视图一致；多桶时每桶一条 + 自己的到期时间。
+                   * （buckets 缺失 = 旧宿主 → 回退汇总条。）
                    */
-                  h(QuotaMeter, {
-                    remaining: balance.remaining,
-                    total: balance.total,
-                    planName: balance.planName,
-                    expiresAt: balance.expiresAt,
-                  }),
+                  Array.isArray(balance.buckets) && balance.buckets.length > 1
+                    ? balance.buckets.map((bucket, index) =>
+                        h(QuotaMeter, {
+                          key: `${bucket.planId ?? 'bucket'}-${index}`,
+                          remaining: bucket.remaining,
+                          total: bucket.total,
+                          planName: bucket.showName ?? `额度桶 ${index + 1}`,
+                          expiresAt: bucket.expiresAt,
+                        }),
+                      )
+                    : h(QuotaMeter, {
+                        remaining: balance.remaining,
+                        total: balance.total,
+                        planName: balance.planName,
+                        expiresAt: balance.expiresAt,
+                      }),
                   (balance.pending ?? []).map((item, index) =>
                     h(
                       React.Fragment,

@@ -484,3 +484,38 @@ test('ClaimSection 源码：探测走 /claimable（marketing/touch），领取�
   /** /billing/preview 是死端点：客户端源码任何地方都不许再引用。 */
   assert.doesNotMatch(claimSectionSrc, /billing\/preview/, 'preview 恒空，官方客户端也不调它')
 })
+
+test('AccountCard: 多个额度桶逐桶画条（每桶带自己的到期时间）', () => {
+  const panel = buildPanel()
+  const now = Date.now()
+  const tree = panel.render(panel.AccountCard({
+    account: baseAccount,
+    balance: {
+      ok: true,
+      remaining: 1300, total: 3000,
+      buckets: [
+        { planId: 'soon', showName: '早到期包', remaining: 800, total: 2000, expiresAt: now + 3 * 86_400_000 },
+        { planId: 'late', showName: '晚到期包', remaining: 500, total: 1000, expiresAt: now + 7 * 86_400_000 },
+      ],
+    },
+    modelListVisible: true,
+  }))
+  const bars = findAll(tree, (node) => node.props?.className === 'zsp-bar')
+  assert.equal(bars.length, 2, '两个桶 = 两条进度条')
+  const text = textOf(tree)
+  assert.match(text, /早到期包/, '桶名')
+  assert.match(text, /晚到期包/, '桶名')
+  assert.match(text, /剩余 800\/2000/, '第一桶自己的数值')
+  assert.match(text, /剩余 500\/1000/, '第二桶自己的数值')
+})
+
+test('AccountCard: 单桶时走汇总条（不重复画）', () => {
+  const panel = buildPanel()
+  const tree = panel.render(panel.AccountCard({
+    account: baseAccount,
+    balance: { ok: true, remaining: 100, total: 200, buckets: [{ planId: 'p', showName: 'GLM', remaining: 100, total: 200, expiresAt: Date.now() + 3600_000 }] },
+    modelListVisible: true,
+  }))
+  const bars = findAll(tree, (node) => node.props?.className === 'zsp-bar')
+  assert.equal(bars.length, 1, '单桶 = 一条')
+})

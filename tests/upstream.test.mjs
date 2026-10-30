@@ -248,3 +248,46 @@ test('fetchBalance: 未生效权益带上 plan 的 ends_at 作为到期时间', 
   }))
   assert.equal(balance.pending[0].expiresAt, 1_793_062_800_000)
 })
+
+test('fetchBalance: 多桶按到期时间升序、空桶沉底（逐桶到期时间供面板分条显示）', async () => {
+  const { fetchBalance } = await import('../lib/upstream-api.js')
+  const now = Math.floor(Date.now() / 1000)
+  const balance = await fetchBalance({ zcode_jwt: 'j', device_mid: 'd' }, fakeFetch({
+    code: 0,
+    data: {
+      server_time: now,
+      balances: [
+        { plan_id: 'late', show_name: '晚到期', total_units: 1000, remaining_units: 500, expires_at: now + 7 * 86_400 },
+        { plan_id: 'empty', show_name: '空桶', total_units: 1000, remaining_units: 0, expires_at: now + 86_400 },
+        { plan_id: 'soon', show_name: '早到期', total_units: 2000, remaining_units: 800, expires_at: now + 3 * 86_400 },
+      ],
+    },
+  }))
+  assert.deepEqual(
+    balance.buckets.map((b) => b.planId),
+    ['soon', 'late', 'empty'],
+    '有余额的桶按到期升序，空桶沉底',
+  )
+  assert.equal(balance.expiresAt, (now + 3 * 86_400) * 1000, '顶层 expiresAt = 最早到期的有余额桶')
+  /** 每个桶带自己的数值与到期时间（面板分条用）。 */
+  for (const b of balance.buckets) {
+    assert.equal(typeof b.remainingUnits, 'number')
+    assert.equal(typeof b.totalUnits, 'number')
+    assert.ok(b.expiresAt > Date.now())
+  }
+})
+
+test('fetchBalance: 单桶时行为不变（buckets 仍下发，面板走汇总条）', async () => {
+  const { fetchBalance } = await import('../lib/upstream-api.js')
+  const now = Math.floor(Date.now() / 1000)
+  const balance = await fetchBalance({ zcode_jwt: 'j', device_mid: 'd' }, fakeFetch({
+    code: 0,
+    data: {
+      server_time: now,
+      balances: [{ plan_id: 'p', show_name: 'GLM', total_units: 100, remaining_units: 40, expires_at: now + 3600 }],
+    },
+  }))
+  assert.equal(balance.buckets.length, 1)
+  assert.equal(balance.remaining, 40)
+  assert.equal(balance.total, 100)
+})
