@@ -50,7 +50,6 @@ window.__ModuleLoader__.load({
       .zsp-error{color:var(--dsw-alias-label-danger);margin:0;font-size:12px;word-break:break-word}
       .zsp-ok{color:var(--dsw-alias-state-success-primary);font-size:12px;word-break:break-word;margin:0}
       .zsp-card{display:flex;flex-direction:column;gap:6px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);border-radius:8px;padding:10px 12px;min-width:0}
-      .zsp-card[data-next=true]{border-color:var(--dsw-alias-state-business-primary)}
       .zsp-card[data-hidden=true]{opacity:.62}
       .zsp-group{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:10px 12px;min-width:0}
       .zsp-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
@@ -611,14 +610,14 @@ window.__ModuleLoader__.load({
      * 按钮只有两个：「使用」（置顶，下次请求即用它）与「删除」。
      */
     function AccountCard(props) {
-      const { account, balance, busy, isNext, modelListVisible, onToggleModelList, confirmId, setConfirmId, onRemove, onRename } = props
+      const { account, balance, busy, modelListVisible, onToggleModelList, confirmId, setConfirmId, onRemove, onRename } = props
       /** Host 下发的是 `modelRateLimits` 对象（model → resetAt），摊平成 chips。 */
       const limited = Object.entries(account.modelRateLimits ?? {})
         .map(([model, resetAt]) => ({ model, resetAt }))
         .filter((item) => Number(item.resetAt) > Date.now())
       return h(
         'div',
-        { className: 'zsp-card', 'data-next': isNext === true, 'data-hidden': modelListVisible === false },
+        { className: 'zsp-card', 'data-hidden': modelListVisible === false },
         h(
           'div',
           { className: 'zsp-row' },
@@ -1058,8 +1057,6 @@ window.__ModuleLoader__.load({
       }
 
       const accounts = data !== undefined && Array.isArray(data.accounts) ? data.accounts : undefined
-      /** 「按序下一个」= 列表里第一个启用的账号（pool.pick 的取号规则）。 */
-      const nextAccount = accounts !== undefined ? accounts.find((account) => account.enabled === true) : undefined
       /** 统一选号栏位当前是否显示（关掉 = 模型列表只留每账号一栏）。 */
       const unifiedVisible = data?.unifiedModelList !== false
 
@@ -1116,7 +1113,6 @@ window.__ModuleLoader__.load({
                   account,
                   balance: balances[account.id],
                   busy,
-                  isNext: nextAccount !== undefined && nextAccount.id === account.id,
                   modelListVisible: account.modelListVisible !== false,
                   onToggleModelList: (visible) => void act('/model-list-visible', { id: account.id, visible }),
                   confirmId,
