@@ -219,9 +219,10 @@ node bin/cli.mjs probe       # 真发一条最小请求，验证「选号 → ca
 node bin/cli.mjs claim        # 探测活动（marketing/touch）→ 逐个领取（每个 plan 单独 captcha）
 ```
 
-**活动探测（自动）**：plan_id 不需要手抄——官方把它写在营销投放
+**活动探测（自动）**：plan_id 不需要手抄、也没有输入框——官方把它写在营销投放
 （`GET /api/v1/marketing/touch`）按钮的 `claim_zcode_plan` action 里。
-CLI `claim` 与面板展开时都会**自动探测**（GET、零 captcha、不消耗任何资源）。
+CLI `claim` 与面板展开时都会**自动探测**（GET、零 captcha、不消耗任何资源），
+探测结果只读展示，可直接点「领取」。
 
 **自动领取（开关项，0.6.1）**：领取要花掉活动资格 + 一次设备 captcha，
 所以由面板顶部的「自动领取」拨盘控制（默认关）——

@@ -287,7 +287,11 @@ test('QuotaMeter: caption 同时给出剩余、计划名与到期时间', () => 
   assert.match(text, /剩余 7876044\/8000000/)
   assert.match(text, /GLM-5\.3/)
   assert.match(text, /到期/)
-  assert.match(text, /3 小时后/)
+  /**
+   * ⚠ 不要写死「3 小时后」：`expiresAt` 与渲染时刻之间会因毫秒误差落到
+   * 「2 小时 59 分后」，断言就随开机时刻飘（本用例曾因此间歇性失败）。
+   */
+  assert.match(text, /[23] 小时(?: \d+ 分)?后/, '相对时间（约 3 小时后，容忍分钟级抖动）')
 })
 
 test('QuotaMeter: 未生效额度同时给"何时起可用"与"何时到期"', () => {
@@ -421,13 +425,28 @@ test('ClaimSection: 展开后给输入框与领取按钮，不再依赖 preview 
   assert.doesNotMatch(text, /查看可领取/, '不该再有"查看可领取"（它依赖恒空的 preview）')
   assert.doesNotMatch(text, /暂无可领取的活动/, '不该再显示"暂无可领取"')
   /** 新话术要在。 */
-  assert.match(text, /plan_id/)
-  assert.match(text, /探测/, '0.6.0：探测按钮（marketing/touch 自动填 plan_id）')
+  assert.match(text, /自动探测/, '探测是自动的（展开即探）')
+})
+
+/**
+ * ⚠ 契约：**不保留手工输入 plan_id 的组件**。
+ *
+ * 有过三个版本的反复：先「查 preview 列表 → 有才领」，再「填 plan_id 直接领」，
+ * 现在「自动探测 → 直接领」。手输路径只会让人填错或填过期 id，白烧一次 captcha；
+ * 探测零成本且权威，所以输入框与「探测」按钮一起移除，plan_id 只读展示。
+ */
+test('ClaimSection: 没有手工输入 plan_id 的输入框，也没有探测按钮', () => {
+  const claimSectionSrc = extractFunction('ClaimSection')
+  assert.doesNotMatch(claimSectionSrc, /placeholder/, '不该有占位提示的输入框')
+  assert.doesNotMatch(claimSectionSrc, /onChange:\s*\(event\)\s*=>\s*patch\([^)]*planId/, '不该有改 planId 的输入')
+  assert.doesNotMatch(claimSectionSrc, /'探测'/, '探测按钮已移除：展开即自动探测')
+  /** plan_id 改由探测结果驱动，只读展示。 */
+  assert.match(claimSectionSrc, /zsp-plan-id/, 'plan_id 只读展示')
 })
 
 test('ClaimSection 源码：探测走 /claimable（marketing/touch），领取直接 /claim，绝无 preview', () => {
   const claimSectionSrc = extractFunction('ClaimSection')
-  assert.match(claimSectionSrc, /\/claimable/, '0.6.0：探测按钮调 /claimable（已改走官方 marketing/touch，零 captcha）')
+  assert.match(claimSectionSrc, /\/claimable/, '探测调 /claimable（官方 marketing/touch，零 captcha）')
   assert.match(claimSectionSrc, /\/claim/, '必须直接走 /claim')
   assert.match(claimSectionSrc, /planId/, '必须按 planId 领取')
   /** /billing/preview 是死端点：客户端源码任何地方都不许再引用。 */

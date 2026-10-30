@@ -63,6 +63,8 @@ window.__ModuleLoader__.load({
       .zsp-name-input{font:inherit;font-weight:600;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-state-business-primary);border-radius:4px;padding:1px 6px;width:180px;max-width:100%}
       .zsp-name-input:focus-visible{outline:none}
       .zsp-chip{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--dsw-alias-border-l1);border-radius:999px;padding:1px 8px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary)}
+      /* 探测到的 plan_id：只读展示（没有手输路径，见 ClaimSection 渲染处注释）。 */
+      .zsp-plan-id{font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2);border-radius:4px;padding:1px 6px;user-select:all}
       .zsp-chip[data-limited=true]{color:var(--dsw-alias-label-danger);border-color:var(--dsw-alias-label-danger)}
       .zsp-bar{height:6px;border-radius:3px;background:var(--dsw-alias-bg-layer-2);overflow:hidden;width:100%}
       .zsp-bar>span{display:block;height:100%;background:var(--dsw-alias-state-business-primary)}
@@ -350,9 +352,10 @@ window.__ModuleLoader__.load({
 
       const claim = useCallback(
         async (id) => {
-          const planId = (state[id]?.planId ?? '').trim()
-          if (planId.length === 0) {
-            patch(id, { error: '请先点「探测」自动填 plan_id（或从活动页抄）' })
+          /** plan_id 只来自探测结果 —— 没有手输路径（见渲染处注释）。 */
+          const planId = state[id]?.plans?.[0]?.planId
+          if (typeof planId !== 'string' || planId.length === 0) {
+            patch(id, { error: '当前没有探测到可领取的活动' })
             return
           }
           patch(id, { loading: true, error: undefined, results: undefined })
@@ -369,9 +372,8 @@ window.__ModuleLoader__.load({
       )
 
       /**
-       * 探测活动：调 /claimable（官方 marketing/touch 发现端点，GET、零 captcha），
-       * 把找到的 plan_id 自动填进输入框。多个活动时填第一个（priority 最高的），
-       * 其余显示在提示里。**这是自动的**，与「自动领取」开关无关。
+       * 探测活动：调 /claimable（官方 marketing/touch 发现端点，GET、零 captcha）。
+       * **自动执行**（展开即探），结果存进 state 供渲染与领取使用。
        */
       const probe = useCallback(
         async (id) => {
@@ -382,18 +384,13 @@ window.__ModuleLoader__.load({
             const data = await response.json().catch(() => ({}))
             if (!response.ok) throw new Error(typeof data?.error === 'string' ? data.error : `HTTP ${response.status}`)
             const plans = Array.isArray(data.plans) ? data.plans : []
-            if (plans.length === 0) {
-              patch(id, { probing: false, error: data.error ?? '当前没有探测到可领取的活动（投放可能已结束，或稍后再试）' })
-              return
-            }
-            const rest = plans.slice(1).map((plan) => plan.planId).join('、')
             patch(id, {
               probing: false,
-              planId: plans[0].planId,
-              probed: `${plans.length} 个活动${rest.length > 0 ? `（其它：${rest}）` : ''}`,
+              plans,
+              ...(plans.length === 0 ? { error: data.error ?? '当前没有探测到可领取的活动' } : {}),
             })
           } catch (caught) {
-            patch(id, { probing: false, error: caught instanceof Error ? caught.message : String(caught) })
+            patch(id, { probing: false, plans: [], error: caught instanceof Error ? caught.message : String(caught) })
           }
         },
         [],
@@ -458,8 +455,8 @@ window.__ModuleLoader__.load({
             'span',
             { className: 'zsp-muted' },
             captchaReachable
-              ? '「探测活动」自动填 plan_id（发现端点零 captcha），领取才需要 captcha'
-              : '「探测活动」自动填 plan_id；日常调用模型不受影响，只有领取需要 captcha',
+              ? '展开即自动探测活动（零 captcha），领取才需要 captcha'
+              : '展开即自动探测活动；日常调用模型不受影响，只有领取需要 captcha',
           ),
           h('span', { className: 'zsp-spacer' }),
           captchaReachable
@@ -509,6 +506,13 @@ window.__ModuleLoader__.load({
         open
           ? accounts.map((account) => {
               const slot = state[account.id] ?? {}
+              /**
+               * ⚠ 这里**没有 plan_id 输入框**：探测是自动的（展开即探），
+               * plan_id 只作为**只读**标识展示。手工粘贴活动 id 的路径已移除 ——
+               * 它只会让人填错、填过期的 id，然后白烧一次 captcha。
+               */
+              const plans = Array.isArray(slot.plans) ? slot.plans : []
+              const planId = plans[0]?.planId
               return h(
                 'div',
                 { key: account.id, className: 'zsp-row', style: { alignItems: 'flex-start' } },
@@ -516,18 +520,11 @@ window.__ModuleLoader__.load({
                 h(
                   'div',
                   { className: 'zsp-meter', style: { flex: '1 1 auto' } },
-                  h('input', {
-                    className: 'zsp-name-input',
-                    style: { width: '260px' },
-                    placeholder: 'plan_id（点「探测」自动填，或从活动页抄）',
-                    value: slot.planId ?? '',
-                    disabled: busy || slot.loading === true,
-                    onChange: (event) => patch(account.id, { planId: event.target.value, error: undefined, results: undefined }),
-                  }),
+                  h('code', { className: 'zsp-plan-id' }, planId ?? '—'),
                   slot.probing === true
                     ? h('span', { className: 'zsp-muted' }, '探测中…')
-                    : slot.probed !== undefined
-                      ? h('span', { className: 'zsp-muted' }, slot.probed)
+                    : plans.length > 1
+                      ? h('span', { className: 'zsp-muted' }, `等 ${plans.length} 个活动`)
                       : null,
                   slot.loading === true
                     ? h('span', { className: 'zsp-muted' }, '领取中…（captcha 失败会自动重试一次）')
@@ -557,15 +554,10 @@ window.__ModuleLoader__.load({
                     'button',
                     {
                       className: 'zsp-btn',
-                      onClick: () => void probe(account.id),
-                      disabled: busy || slot.probing === true || slot.loading === true,
-                      title: '查询官方活动发现端点（marketing/touch，无需 captcha），自动填 plan_id',
+                      onClick: () => void claim(account.id),
+                      disabled: busy || slot.loading === true || slot.probing === true || planId === undefined,
+                      title: planId === undefined ? '当前没有探测到可领取的活动' : `领取 ${planId}`,
                     },
-                    slot.probing === true ? '探测中…' : '探测',
-                  ),
-                  h(
-                    'button',
-                    { className: 'zsp-btn', onClick: () => void claim(account.id), disabled: busy || slot.loading === true },
                     slot.loading === true ? '领取中…' : '领取',
                   ),
                 ),
