@@ -98,10 +98,11 @@ function extractFunction(name) {
 
 /** 把抽出来的组件 + 依赖函数拼成一个可执行模块。 */
 function buildPanel() {
-  const helpers = ['formatReset', 'formatEffective', 'formatPendingUnits', 'formatRemaining', 'channelLabel'].map(extractFunction).join('\n')
+  const helpers = ['formatReset', 'formatEffective', 'formatPendingUnits', 'formatRemaining', 'formatTokens', 'channelLabel'].map(extractFunction).join('\n')
   const quota = extractFunction('QuotaMeter')
   const card = extractFunction('AccountCard')
   const claimSection = extractFunction('ClaimSection')
+  const totalQuota = extractFunction('TotalQuota')
   /**
    * 桩件：NicknameEdit / Toggle / api 用最简实现替代（它们的渲染不是本测试的主题），
    * `h`/`Fragment` 从 fake React 取。
@@ -117,7 +118,8 @@ function buildPanel() {
     ${quota}
     ${card}
     ${claimSection}
-    return { AccountCard, QuotaMeter, ClaimSection, formatEffective, formatPendingUnits, formatRemaining }
+    ${totalQuota}
+    return { AccountCard, QuotaMeter, ClaimSection, TotalQuota, formatEffective, formatPendingUnits, formatRemaining, formatTokens }
   `
   // eslint-disable-next-line no-new-func
   const mod = new Function('React', code)(FakeReact)
@@ -526,4 +528,34 @@ test('AccountCard: 0.7.0 移除「使用」按钮（统一选号按到期时间�
   assert.doesNotMatch(src, /使用中/, '不再有「使用中」态')
   /** 快过期的先用 —— 面板不再提供手动置顶入口。 */
   assert.doesNotMatch(src, /onUse/, 'onUse 链路应一并移除')
+})
+
+test('TotalQuota: 汇总各账号余额桶、按到期日分层、跳过未加载账号', () => {
+  const panel = buildPanel()
+  const now = Date.now()
+  const tree = panel.render(panel.TotalQuota({
+    accounts: [{ id: 'a' }, { id: 'b' }, { id: 'c' }],
+    balances: {
+      a: { ok: true, buckets: [
+        { remaining: 300_000_000, total: 500_000_000, expiresAt: now + 86_400_000 },
+        { remaining: 3_000_000, total: 3_000_000, expiresAt: now + 3_600_000 },
+      ] },
+      b: { ok: true, buckets: [{ remaining: 297_000_000, total: 300_000_000, expiresAt: now + 86_400_000 }] },
+      /** c 未加载（懒加载中）→ 不计入。 */
+      c: { ok: false, error: '余额加载中…' },
+    },
+  }))
+  const text = textOf(tree)
+  assert.match(text, /总额度/, '标题行')
+  assert.match(text, /2\/3 个账号已加载/, 'c 未加载要注明（6 亿 / 8.03 亿 只算 a+b）')
+  assert.match(text, /300万 \/ 300万/, '分层小计出现（b 的桶，formatTokens 万级）')
+  /** 两条分层（到期日不同：明天 与 1 小时后）。 */
+  const bars = findAll(tree, (n) => n.props?.className === 'zsp-bar')
+  assert.equal(bars.length, 2, '两个到期日 = 两条分层进度条')
+})
+
+test('TotalQuota: 全部未加载 / 无账号时不渲染', () => {
+  const panel = buildPanel()
+  assert.equal(panel.TotalQuota({ accounts: [], balances: {} }), null)
+  assert.equal(panel.render(panel.TotalQuota({ accounts: [{ id: 'a' }], balances: { a: { ok: false, error: 'x' } } })), null)
 })

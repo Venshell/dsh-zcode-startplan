@@ -199,6 +199,15 @@ window.__ModuleLoader__.load({
       return String(units)
     }
 
+    /** token 数值的紧凑显示（总额度行用）：3.9亿 / 500万 / 8400。 */
+    function formatTokens(units) {
+      const n = Number(units)
+      if (!Number.isFinite(n)) return '0'
+      if (n >= 100_000_000) return `${(n / 100_000_000).toFixed(n % 100_000_000 === 0 ? 0 : 2)}亿`
+      if (n >= 10_000) return `${Math.round(n / 10_000)}万`
+      return String(Math.round(n))
+    }
+
     /**
      * 还多久到期，如「3 小时后」「12 分钟后」「2 天后」「已过期」。
      *
@@ -317,6 +326,80 @@ window.__ModuleLoader__.load({
         },
         onBlur: () => setEditing(false),
       })
+    }
+
+    /**
+     * OpenAI 兼容端点配置区（0.9.3）：开关 + 连接信息 + apiKey 显隐。
+     *
+     * ⚠ 开关只写 settings.json，**重启宿主后生效**（HTTP server 热启停会牵扯
+     * 端口占用，不做运行时切换）—— UI 必须把这点写明白，否则用户拨了开关
+     * 没反应会当成坏了。
+     * ⚠ apiKey 常态只显示尾 4 位；点「显示」才向宿主要全量（宿主只在该次
+     * 请求下发，绝不进 summary）。
+     */
+    function OpenAiGatewaySection(props) {
+      const { gateway, busy, onChanged } = props
+      const [revealed, setRevealed] = useState(false)
+      const [toggling, setToggling] = useState(false)
+      if (gateway === undefined) return null
+      const effectiveOn = gateway.running === true
+
+      const showKey = async () => {
+        try {
+          const response = await fetch(`${API}/openai-gateway?reveal=1`)
+          const data = await response.json().catch(() => ({}))
+          if (response.ok && typeof data?.apiKey === 'string') {
+            setRevealed(data.apiKey)
+          }
+        } catch {
+          // 显示失败就保持掩码，不值得报错。
+        }
+      }
+
+      const toggle = async () => {
+        setToggling(true)
+        try {
+          await api('/openai-gateway', { enabled: gateway.enabledInSettings !== true })
+          if (typeof onChanged === 'function') await onChanged()
+        } finally {
+          setToggling(false)
+        }
+      }
+
+      return h(
+        'div',
+        { className: 'zsp-group' },
+        h(
+          'div',
+          { className: 'zsp-row' },
+          h('span', { className: 'zsp-dot', 'data-on': effectiveOn }),
+          h('span', { className: 'zsp-name' }, 'OpenAI 兼容端点'),
+          h(
+            'span',
+            { className: 'zsp-muted', style: { flex: '1 1 auto', minWidth: 0 } },
+            effectiveOn
+              ? `运行中 · ${gateway.baseUrl ?? ''}`
+              : gateway.enabledInSettings === true
+                ? '已开启（重启宿主后生效）'
+                : '未开启：任意 OpenAI 客户端可经此使用账号池额度',
+          ),
+          h(
+            'span',
+            { className: 'zsp-toggle-row' },
+            h(Toggle, { checked: gateway.enabledInSettings === true, disabled: busy || toggling, onChange: () => void toggle() }),
+          ),
+        ),
+        effectiveOn
+          ? h(
+              'div',
+              { className: 'zsp-row', style: { paddingLeft: '18px' } },
+              h('span', { className: 'zsp-muted' }, 'apiKey'),
+              h('code', { className: 'zsp-plan-id', onClick: revealed ? undefined : () => void showKey(), style: { cursor: 'pointer' } },
+                revealed ? revealed : '点击显示'),
+              h('span', { className: 'zsp-muted' }, 'baseURL 就是上面那行（/v1 结尾）'),
+            )
+          : null,
+      )
     }
 
     /**
@@ -614,6 +697,78 @@ window.__ModuleLoader__.load({
               )
             })
           : null,
+      )
+    }
+
+    /**
+     * 池子**总额度**行（0.9.3，置顶）：把各账号已加载的余额桶求和，
+     * 按「到期时间分层」显示 —— 快过期的一组、日重置的一组，一眼看出
+     * 「多少能用多久」。数据源与账号卡片同源（balances），未加载完的账号不计入。
+     */
+    function TotalQuota(props) {
+      const { accounts, balances } = props
+      if (!Array.isArray(accounts) || accounts.length === 0) return null
+      const entries = accounts
+        .map((account) => balances?.[account.id])
+        .filter((balance) => balance?.ok === true && balance.enterprise !== true)
+      if (entries.length === 0) return null
+      /** 按到期日分层：同一天到期的桶合并成一组（日重置桶全部落在 23:59）。 */
+      const byDay = new Map()
+      let loaded = 0
+      for (const balance of entries) {
+        const buckets = Array.isArray(balance.buckets) && balance.buckets.length > 0
+          ? balance.buckets
+          : [{ remaining: balance.remaining, total: balance.total, expiresAt: balance.expiresAt }]
+        for (const bucket of buckets) {
+          const remaining = typeof bucket.remaining === 'number' ? bucket.remaining : 0
+          const total = typeof bucket.total === 'number' ? bucket.total : 0
+          if (total <= 0) continue
+          loaded += 1
+          const day = typeof bucket.expiresAt === 'number' && bucket.expiresAt > 0
+            ? new Date(bucket.expiresAt).toISOString().slice(0, 10)
+            : '—'
+          const entry = byDay.get(day) ?? { remaining: 0, total: 0, expiresAt: undefined }
+          entry.remaining += remaining
+          entry.total += total
+          if (typeof bucket.expiresAt === 'number' && bucket.expiresAt > 0) {
+            entry.expiresAt = entry.expiresAt === undefined ? bucket.expiresAt : Math.min(entry.expiresAt, bucket.expiresAt)
+          }
+          byDay.set(day, entry)
+        }
+      }
+      if (loaded === 0) return null
+      const groups = [...byDay.entries()].sort((a, b) => (a[1].expiresAt ?? Infinity) - (b[1].expiresAt ?? Infinity))
+      const totalRemaining = groups.reduce((sum, [, g]) => sum + g.remaining, 0)
+      const totalAll = groups.reduce((sum, [, g]) => sum + g.total, 0)
+      return h(
+        'div',
+        { className: 'zsp-group zsp-total' },
+        h(
+          'div',
+          { className: 'zsp-row' },
+          h('span', { className: 'zsp-name' }, '总额度'),
+          h(
+            'span',
+            { className: 'zsp-muted' },
+            `${formatTokens(totalRemaining)} / ${formatTokens(totalAll)} tokens · ${entries.length}/${accounts.length} 个账号已加载`,
+          ),
+        ),
+        groups.map(([day, group]) =>
+          h(
+            'div',
+            { key: day, className: 'zsp-row', style: { paddingLeft: '18px' } },
+            h('span', { className: 'zsp-muted', style: { minWidth: '150px' } },
+              `${day === '—' ? '无到期' : formatEffective(group.expiresAt)} 到期`),
+            h(
+              'div',
+              { className: 'zsp-meter', style: { flex: '1 1 auto' } },
+              h('div', { className: 'zsp-bar' },
+                h('span', { style: { width: `${group.total > 0 ? Math.max(0, Math.min(100, Math.round((group.remaining / group.total) * 100))) : 0}%` } })),
+              h('span', { className: 'zsp-muted zsp-meter-caption' },
+                `${formatTokens(group.remaining)} / ${formatTokens(group.total)}`),
+            ),
+          ),
+        ),
       )
     }
 
@@ -1090,6 +1245,11 @@ window.__ModuleLoader__.load({
           h('span', { className: 'zsp-spacer' }),
           h('button', { className: 'zsp-btn', onClick: () => void load(), disabled: busy }, '刷新'),
         ),
+        /**
+         * 池子总额度（0.9.3）：汇总所有账号的余额桶，置顶一行。
+         * 数据来自懒加载的 balances —— 未加载完的账号不计入（下方注明）。
+         */
+        h(TotalQuota, { accounts, balances }),
         error !== undefined ? h('p', { className: 'zsp-error' }, error) : null,
         data === undefined && error === undefined ? h('span', { className: 'zsp-muted' }, '加载中…') : null,
         h(AddAccountSection, { busy, onAdded: () => void load() }),
@@ -1135,6 +1295,7 @@ window.__ModuleLoader__.load({
               )
             : null,
         ),
+        h(OpenAiGatewaySection, { gateway: data?.openAiGateway, busy, onChanged: () => void load() }),
         h(ClaimSection, {
           accounts,
           busy,

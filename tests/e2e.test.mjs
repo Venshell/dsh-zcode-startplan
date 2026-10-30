@@ -322,9 +322,10 @@ test('apply：等 llm 出现后注册 adapter + 状态工具，dispose 时收尾
   /**
    * ⚠ 面板 404 的回归闸：管理路由必须经**可选注入**挂到 `webServer` 上。
    * 0.4.4 从 facade 探测 `ctx.webServer` → 拿不到 → 静默跳过 → 面板永远 404。
-   * 这里断言 16 条 `/api/zcode-start-plan/*` 路由真的注册进了路由表。
+   * 这里断言 17 条 `/api/zcode-start-plan/*` 路由真的注册进了路由表。
+   * （0.9.3 加了 /openai-gateway：状态 + 开关。）
    */
-  assert.equal(routes.length, 16, `应注册 16 条账号面板路由，实际 ${routes.length}`)
+  assert.equal(routes.length, 17, `应注册 17 条账号面板路由，实际 ${routes.length}`)
   const paths = routes.map((route) => route.path).sort()
   assert.ok(paths.includes('/api/zcode-start-plan/summary'), '缺少 /summary（面板首次加载就靠它）')
   assert.ok(paths.includes('/api/zcode-start-plan/auto-claim'), '缺少 /auto-claim（自动领取开关）')
