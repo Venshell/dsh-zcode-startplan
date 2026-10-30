@@ -702,10 +702,19 @@ window.__ModuleLoader__.load({
           /**
            * 「使用」= 把该账号置顶（手动顺序即选号优先级，`pick()` 取第一个
            * 启用且未限流的账号）；正在使用时显示「使用中」并禁用。
+           * ⚠ 作用域说明（避免「点了没作用」的误会）：置顶只影响**统一选号**
+           * 栏位（不带账号后缀的模型条目）的取号顺序。模型选择器里
+           * 「-acct-xxx」钉定栏位固定消耗指定账号的额度，本就不参与换号，
+           * 置顶对它无效是设计契约。
            */
           h(
             'button',
-            { className: 'zsp-btn', onClick: onUse, disabled: busy || isNext === true },
+            {
+              className: 'zsp-btn',
+              onClick: onUse,
+              disabled: busy || isNext === true,
+              title: '下次统一选号优先用这个账号（钉定栏位不受影响）',
+            },
             isNext === true ? '使用中' : '使用',
           ),
           confirmId === account.id
