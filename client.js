@@ -441,27 +441,27 @@ window.__ModuleLoader__.load({
               h('code', { className: 'zsp-plan-id' }, freshToken))
           : null,
         (Array.isArray(keys) ? keys : []).map((key) =>
-          h('div', { key: key.token, className: 'zsp-row', style: { alignItems: 'center' } },
+          h('div', { key: key.id, className: 'zsp-row', style: { alignItems: 'center' } },
             h('span', { className: 'zsp-name' }, key.name),
             h('span', { className: 'zsp-muted' },
               `${formatTokens(key.usage.inputTokens + key.usage.outputTokens)} 已用 · ${key.usage.requests} 次`),
-            /** 限额 −/+ 调节（步进 100 万 tokens）；不限额时 − 禁用。 */
+            /** 限额 −/+ 调节（步进 100 万 tokens）；不限额时 − 禁用、+ 设为 500 万起点。 */
             h('button', { className: 'zsp-btn', disabled: busy || key.quotaTotal === null,
-              onClick: () => void op(key.token, 'update', { quotaTotal: Math.max(100_000, (key.quotaTotal ?? 0) - 1_000_000) }),
+              onClick: () => void op(key.id, 'update', { quotaTotal: Math.max(100_000, (key.quotaTotal ?? 0) - 1_000_000) }),
               title: key.quotaTotal === null ? '不限额，不能下调' : '-100万' }, '−'),
             h('span', { className: 'zsp-muted', style: { minWidth: '86px', textAlign: 'center' } },
               key.quotaTotal === null ? '不限' : formatTokens(key.quotaTotal)),
             h('button', { className: 'zsp-btn', disabled: busy,
-              onClick: () => void op(key.token, 'update', { quotaTotal: (key.quotaTotal ?? 0) + 1_000_000 }),
-              title: '+100万' }, '+'),
+              onClick: () => void op(key.id, 'update', { quotaTotal: key.quotaTotal === null ? 5_000_000 : (key.quotaTotal ?? 0) + 1_000_000 }),
+              title: key.quotaTotal === null ? '设为 500万' : '+100万' }, key.quotaTotal === null ? '设限额' : '+'),
             h('span', { className: 'zsp-chip', 'data-limited': key.enabled !== true }, key.enabled ? '启用' : '已禁用'),
             key.accountId
               ? h('span', { className: 'zsp-chip' }, `钉定 #${(accounts ?? []).find((a) => a.id === key.accountId)?.nickname ?? key.accountId.slice(0, 8)}`)
               : null,
             h('span', { className: 'zsp-spacer' }),
-            h('button', { className: 'zsp-btn', onClick: () => void op(key.token, 'update', { enabled: key.enabled !== true }), disabled: busy },
+            h('button', { className: 'zsp-btn', onClick: () => void op(key.id, 'update', { enabled: key.enabled !== true }), disabled: busy },
               key.enabled ? '禁用' : '启用'),
-            h('button', { className: 'zsp-btn', 'data-danger': 'true', onClick: () => void op(key.token, 'delete'), disabled: busy }, '删除'),
+            h('button', { className: 'zsp-btn', 'data-danger': 'true', onClick: () => void op(key.id, 'delete'), disabled: busy }, '删除'),
           )),
       )
     }
