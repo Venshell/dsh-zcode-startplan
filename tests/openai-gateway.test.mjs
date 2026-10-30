@@ -19,7 +19,6 @@ import assert from 'node:assert/strict'
 import {
   collectChatCompletion,
   contentToText,
-  resolveOpenAiApiKey,
   toGenerateOptions,
   toOpenAiSse,
 } from '../lib/openai-gateway.js'
@@ -290,55 +289,6 @@ test('collectChatCompletion: 流缺 finish 时报错（不假装成功）', asyn
   )
 })
 
-// ── apiKey 持久化 ──────────────────────────────────────────────────────────
-
-test('resolveOpenAiApiKey: 首次生成 43 位 base64url 并落盘，再次读取同值', async () => {
-  const { mkdtempSync, rmSync, readFileSync } = await import('node:fs')
-  const { tmpdir } = await import('node:os')
-  const { join } = await import('node:path')
-  const dir = mkdtempSync(join(tmpdir(), 'zsp-key-'))
-  try {
-    const first = resolveOpenAiApiKey(dir, {})
-    assert.match(first.value, /^[A-Za-z0-9_-]{43}$/)
-    assert.equal(readFileSync(join(dir, 'openai-api-key'), 'utf8').trim(), first.value)
-    const second = resolveOpenAiApiKey(dir, {})
-    assert.equal(second.value, first.value, '已配置的客户端不能因重启而失效')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('resolveOpenAiApiKey: 环境变量优先', async () => {
-  const { mkdtempSync, rmSync } = await import('node:fs')
-  const { tmpdir } = await import('node:os')
-  const { join } = await import('node:path')
-  const dir = mkdtempSync(join(tmpdir(), 'zsp-key-'))
-  try {
-    const key = resolveOpenAiApiKey(dir, { DSH_OPENAI_GATEWAY_API_KEY: 'my-custom-key' })
-    assert.equal(key.value, 'my-custom-key')
-    assert.equal(key.fromEnv, true)
-    assert.equal(key.path, null)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-/**
- * ⚠ 文件损坏必须**报错**而不是静默换 key：静默换会让所有已配置客户端同时 401，
- * 且用户只看到 "unauthorized"，无从判断是自己粘错了还是服务端变了。
- */
-test('resolveOpenAiApiKey: 文件被改坏时报错并给恢复办法（不静默更换）', async () => {
-  const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs')
-  const { tmpdir } = await import('node:os')
-  const { join } = await import('node:path')
-  const dir = mkdtempSync(join(tmpdir(), 'zsp-key-'))
-  try {
-    writeFileSync(join(dir, 'openai-api-key'), 'my-hand-edited-key')
-    assert.throws(() => resolveOpenAiApiKey(dir, {}), /内容异常/)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
 
 /**
  * ⚠ 真实 bug（实现期踩到）：`result.decoder` 是
@@ -350,10 +300,9 @@ test('resolveOpenAiApiKey: 文件被改坏时报错并给恢复办法（不静�
  * 本用例用**真实 decoder 形状**驱动整条 HTTP 路径。
  */
 test('HTTP: 流式走真实 decoder 形状（read() 而非 for await），帧完整', async () => {
-  const { startOpenAiGateway, resolveOpenAiApiKey } = await import('../lib/openai-gateway.js')
-  const key = resolveOpenAiApiKey((await import('node:fs')).mkdtempSync(
-    (await import('node:path')).join((await import('node:os')).tmpdir(), 'zsp-gw-'),
-  ), {})
+  const { startOpenAiGateway } = await import('../lib/openai-gateway.js')
+  /** 分发 key 形态（网关 0.9.5 起只认它）。 */
+  const key = `zsp-${(await import('node:crypto')).randomBytes(16).toString('base64url')}`
   const all = [
     { type: 'reasoning-delta', index: 0, text: '思考' },
     { type: 'text-delta', index: 0, text: '回答' },
@@ -370,15 +319,16 @@ test('HTTP: 流式走真实 decoder 形状（read() 而非 for await），帧完
   }
   const gateway = await startOpenAiGateway({
     port: 0,
-    token: key.value,
     models: async () => [],
     log: () => {},
     planClient: { call: async () => ({ head: all.slice(0, 1), decoder }) },
+    /** 0.9.5 起鉴权只认分发 key：让本测试的随机 key 有效。 */
+    findDistributionKey: (presented) => (presented === key ? { token: key, enabled: true, usage: {} } : undefined),
   })
   try {
     const response = await fetch(`${gateway.baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${key.value}`, 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
       body: JSON.stringify({ stream: true, messages: [{ role: 'user', content: 'hi' }] }),
     })
     const raw = await response.text()

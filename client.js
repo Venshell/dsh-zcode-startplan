@@ -403,10 +403,10 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 分发 key 管理区（0.9.4）：生成 / 禁用 / 删除 / 用量与剩余额度。
+     * 分发 key 管理区（0.9.4/0.9.5）：生成 / 限额调节 / 禁用 / 删除。
      *
-     * ⚠ token 明文**只在创建响应里出现一次**（服务端不再保存可复现形态），
-     * 前端用 local state 暂存刚创建的那把，用户复制后即忘 —— 丢了只能删了重建。
+     * ⚠ token 明文**只在创建响应里出现一次**，前端暂存刚创建的那把，复制后即忘。
+     * 限额用 −/+ 按钮（步进 100 万 tokens）直接调节，不用弹输入框。
      */
     function DistributionKeysSection(props) {
       const { keys, accounts, busy, onChanged } = props
@@ -459,7 +459,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'zsp-row' },
           h('span', { className: 'zsp-name' }, '分发 Key'),
           h('span', { className: 'zsp-muted', style: { flex: '1 1 auto' } },
-            '给其它设备/用户发受限 key：各自计量、可限额、可钉定账号；额度用尽即拒绝（不切主额度）')),
+            '独立计量与限额；额度用尽即拒绝')),
         h('div', { className: 'zsp-row' },
           h('input', { className: 'zsp-name-input', placeholder: '备注（给谁）', value: newName, onChange: (e) => setNewName(e.target.value), style: { maxWidth: '140px' } }),
           h('input', { className: 'zsp-name-input', placeholder: '限额 tokens（空=不限）', value: newQuota, onChange: (e) => setNewQuota(e.target.value), style: { maxWidth: '160px' } }),
@@ -477,7 +477,16 @@ window.__ModuleLoader__.load({
           h('div', { key: key.token, className: 'zsp-row', style: { alignItems: 'center' } },
             h('span', { className: 'zsp-name' }, key.name),
             h('span', { className: 'zsp-muted' },
-              `${formatTokens(key.usage.inputTokens + key.usage.outputTokens)} / ${key.quotaTotal === null ? '不限' : formatTokens(key.quotaTotal)} tokens · ${key.usage.requests} 次`),
+              `${formatTokens(key.usage.inputTokens + key.usage.outputTokens)} 已用 · ${key.usage.requests} 次`),
+            /** 限额 −/+ 调节（步进 100 万 tokens）；不限额时 − 禁用。 */
+            h('button', { className: 'zsp-btn', disabled: busy || key.quotaTotal === null,
+              onClick: () => void op(key.token, 'update', { quotaTotal: Math.max(100_000, (key.quotaTotal ?? 0) - 1_000_000) }),
+              title: key.quotaTotal === null ? '不限额，不能下调' : '-100万' }, '−'),
+            h('span', { className: 'zsp-muted', style: { minWidth: '86px', textAlign: 'center' } },
+              key.quotaTotal === null ? '不限' : formatTokens(key.quotaTotal)),
+            h('button', { className: 'zsp-btn', disabled: busy,
+              onClick: () => void op(key.token, 'update', { quotaTotal: (key.quotaTotal ?? 0) + 1_000_000 }),
+              title: '+100万' }, '+'),
             h('span', { className: 'zsp-chip', 'data-limited': key.enabled !== true }, key.enabled ? '启用' : '已禁用'),
             key.accountId
               ? h('span', { className: 'zsp-chip' }, `钉定 #${(accounts ?? []).find((a) => a.id === key.accountId)?.nickname ?? key.accountId.slice(0, 8)}`)
