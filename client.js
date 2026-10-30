@@ -403,6 +403,94 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 分发 key 管理区（0.9.4）：生成 / 禁用 / 删除 / 用量与剩余额度。
+     *
+     * ⚠ token 明文**只在创建响应里出现一次**（服务端不再保存可复现形态），
+     * 前端用 local state 暂存刚创建的那把，用户复制后即忘 —— 丢了只能删了重建。
+     */
+    function DistributionKeysSection(props) {
+      const { keys, accounts, busy, onChanged } = props
+      const [creating, setCreating] = useState(false)
+      const [newName, setNewName] = useState('')
+      const [newQuota, setNewQuota] = useState('')
+      const [newAccount, setNewAccount] = useState('')
+      const [freshToken, setFreshToken] = useState(undefined)
+
+      const create = async () => {
+        setCreating(true)
+        try {
+          const response = await fetch(`${API}/distribution-keys?op=create`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              name: newName,
+              quotaTotal: newQuota.trim().length > 0 ? Number(newQuota) : null,
+              accountId: newAccount.length > 0 ? newAccount : null,
+            }),
+          })
+          const data = await response.json().catch(() => ({}))
+          if (response.ok && typeof data?.key?.token === 'string') {
+            setFreshToken(data.key.token)
+            setNewName(''); setNewQuota(''); setNewAccount('')
+            if (typeof onChanged === 'function') await onChanged()
+          }
+        } finally {
+          setCreating(false)
+        }
+      }
+
+      const op = async (token, opName, body = {}) => {
+        try {
+          await fetch(`${API}/distribution-keys?op=${opName}`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ token, ...body }),
+          })
+          if (typeof onChanged === 'function') await onChanged()
+        } finally {
+          // onChanged 会刷新列表；失败静默（列表还在）。
+        }
+      }
+
+      if (keys === undefined) return null
+      return h(
+        'div',
+        { className: 'zsp-group' },
+        h('div', { className: 'zsp-row' },
+          h('span', { className: 'zsp-name' }, '分发 Key'),
+          h('span', { className: 'zsp-muted', style: { flex: '1 1 auto' } },
+            '给其它设备/用户发受限 key：各自计量、可限额、可钉定账号；额度用尽即拒绝（不切主额度）')),
+        h('div', { className: 'zsp-row' },
+          h('input', { className: 'zsp-name-input', placeholder: '备注（给谁）', value: newName, onChange: (e) => setNewName(e.target.value), style: { maxWidth: '140px' } }),
+          h('input', { className: 'zsp-name-input', placeholder: '限额 tokens（空=不限）', value: newQuota, onChange: (e) => setNewQuota(e.target.value), style: { maxWidth: '160px' } }),
+          h('select', { className: 'zsp-name-input', value: newAccount, onChange: (e) => setNewAccount(e.target.value), style: { maxWidth: '170px' } },
+            h('option', { value: '' }, '不限账号（用整个池）'),
+            (accounts ?? []).map((a) => h('option', { key: a.id, value: a.id }, `#${a.index} ${a.nickname}`))),
+          h('button', { className: 'zsp-btn', onClick: () => void create(), disabled: busy || creating }, creating ? '生成中…' : '+ 生成'),
+        ),
+        freshToken !== undefined
+          ? h('div', { className: 'zsp-row' },
+              h('span', { className: 'zsp-ok' }, '新 key（只显示这一次，复制保存）：'),
+              h('code', { className: 'zsp-plan-id' }, freshToken))
+          : null,
+        (Array.isArray(keys) ? keys : []).map((key) =>
+          h('div', { key: key.token, className: 'zsp-row', style: { alignItems: 'center' } },
+            h('span', { className: 'zsp-name' }, key.name),
+            h('span', { className: 'zsp-muted' },
+              `${formatTokens(key.usage.inputTokens + key.usage.outputTokens)} / ${key.quotaTotal === null ? '不限' : formatTokens(key.quotaTotal)} tokens · ${key.usage.requests} 次`),
+            h('span', { className: 'zsp-chip', 'data-limited': key.enabled !== true }, key.enabled ? '启用' : '已禁用'),
+            key.accountId
+              ? h('span', { className: 'zsp-chip' }, `钉定 #${(accounts ?? []).find((a) => a.id === key.accountId)?.nickname ?? key.accountId.slice(0, 8)}`)
+              : null,
+            h('span', { className: 'zsp-spacer' }),
+            h('button', { className: 'zsp-btn', onClick: () => void op(key.token, 'update', { enabled: key.enabled !== true }), disabled: busy },
+              key.enabled ? '禁用' : '启用'),
+            h('button', { className: 'zsp-btn', 'data-danger': 'true', onClick: () => void op(key.token, 'delete'), disabled: busy }, '删除'),
+          )),
+      )
+    }
+
+    /**
      * 赠送额度领取区（面板底部）。
      *
      * ## 为什么不是「先查列表再点领取」
@@ -1150,6 +1238,7 @@ window.__ModuleLoader__.load({
       const [balances, setBalances] = useState({})
       const [busy, setBusy] = useState(false)
       const [confirmId, setConfirmId] = useState(undefined)
+      const [distKeys, setDistKeys] = useState(undefined)
 
       /**
        * 统一刷新：summary **立即返回**账号列表（0.6.7 起不在 summary 里拉余额），
@@ -1160,6 +1249,11 @@ window.__ModuleLoader__.load({
         try {
           const summary = await api('/summary')
           setData(summary)
+          /** 分发 key 列表（脱敏形态）单独拉（summary 不带它，见 manage-routes 注释）。 */
+          void fetch(`${API}/distribution-keys`).then(async (r) => {
+            const data = await r.json().catch(() => ({}))
+            if (r.ok) setDistKeys(Array.isArray(data.keys) ? data.keys : [])
+          }).catch(() => {})
           setError(undefined)
           const accounts = Array.isArray(summary?.accounts) ? summary.accounts : []
           const seeded = {}
@@ -1296,6 +1390,7 @@ window.__ModuleLoader__.load({
             : null,
         ),
         h(OpenAiGatewaySection, { gateway: data?.openAiGateway, busy, onChanged: () => void load() }),
+        h(DistributionKeysSection, { keys: distKeys, accounts, busy, onChanged: () => void load() }),
         h(ClaimSection, {
           accounts,
           busy,
