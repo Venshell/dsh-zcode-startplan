@@ -158,22 +158,30 @@ function Wait-PortFree([int]$Port, [int]$TimeoutSec) {
 }
 
 <#
-    拉起新实例：**原 argv + 追加 CDP 端口**（等效 app.relaunch 的重放语义）。
+    拉起新实例：**原 argv**（等效 app.relaunch 的重放语义），`-Port > 0` 时追加 CDP 端口。
 
     ⚠ 只取主进程的 argv。Chromium 子进程的 argv 里有 `--user-data-dir` 等内部参数，
       照抄会造出一个畸形的实例。
+    ⚠ `Port -le 0` = **普通重启**：只重载插件，不带调试端口（重载插件本就不需要调试模式）。
 #>
 function Start-Host($Exe, $OriginalCommandLine, [int]$Port) {
-    $args = @("--remote-debugging-port=$Port")
+    $wantPort = $Port -gt 0
+    $args = if ($wantPort) { @("--remote-debugging-port=$Port") } else { @() }
     if ($OriginalCommandLine) {
         # 去掉可执行文件本身（首段带引号），其余原样保留。
         $rest = $OriginalCommandLine -replace '^\s*"[^"]*"\s*', ''
         if ($rest.Trim().Length -gt 0) {
-            # 已有同名参数就不重复加。
-            if ($rest -notmatch '--remote-debugging-port') {
-                $args = @("--remote-debugging-port=$Port") + @($rest.Trim())
+            if ($wantPort) {
+                # 已有同名参数就不重复加。
+                if ($rest -notmatch '--remote-debugging-port') {
+                    $args = @("--remote-debugging-port=$Port") + @($rest.Trim())
+                } else {
+                    $args = @($rest.Trim())
+                }
             } else {
-                $args = @($rest.Trim())
+                # 普通重启：剥掉原有的调试端口参数（用户此刻不想要端口）。
+                $stripped = ($rest -replace '--remote-debugging-port(=\S+)?', '').Trim()
+                $args = if ($stripped.Length -gt 0) { @($stripped) } else { @() }
             }
         }
     }
@@ -208,6 +216,8 @@ try {
         $Exe = Resolve-ExePath $Exe
         if (-not $Exe) { Write-Log 'fatal: 找不到 DeepSeek Harness.exe（请用 -Exe 显式指定）'; exit 1 }
         Start-Host $Exe '' $DebugPort
+        # 普通重启（DebugPort=0）没有可验证的端口，起完即算完成。
+        if ($DebugPort -le 0) { Write-Log 'relaunched (plain mode)'; exit 0 }
         if (Test-Cdp $DebugPort 40) { Write-Log 'cdp ready (fresh launch)'; exit 0 }
         Write-Log 'cdp NOT ready after fresh launch'; exit 1
     }
@@ -232,12 +242,26 @@ try {
         Start-Sleep -Milliseconds 800
     }
 
-    if (-not (Wait-PortFree $DebugPort 15)) {
-        Write-Log "port $DebugPort still in use after stop; aborting to avoid a silent no-op relaunch"
-        exit 1
+    # ⚠ 只有要开端口时才等端口；普通重启没有端口可等（等 0 号端口会白等 15s）。
+    if ($DebugPort -gt 0) {
+        if (-not (Wait-PortFree $DebugPort 15)) {
+            Write-Log "port $DebugPort still in use after stop; aborting to avoid a silent no-op relaunch"
+            exit 1
+        }
     }
 
     Start-Host $Exe $originalCmd $DebugPort
+
+    # 普通重启：没有端口可验，确认主进程起来了即可（重载插件不依赖调试模式）。
+    if ($DebugPort -le 0) {
+        $started = $false
+        for ($i = 0; $i -lt 40; $i++) {
+            Start-Sleep -Milliseconds 500
+            if (Get-MainProcess) { $started = $true; break }
+        }
+        Write-Log "relaunched (plain mode) main=$started"
+        if ($started) { exit 0 } else { exit 2 }
+    }
 
     $ready = Test-Cdp $DebugPort 45
     Write-Log "cdp ready=$ready"

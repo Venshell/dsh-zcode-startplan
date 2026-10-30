@@ -340,9 +340,9 @@ test('ClaimSection: 空账号池与有账号两次渲染，hook 数量必须一�
   assert.notEqual(filled, null)
   const text = textOf(filled)
   assert.match(text, /赠送额度/)
-  /** captcha 不可用 → 必须给出「以调试模式重启」按钮，而不是让人手抄 param。 */
+  /** captcha 不可用 → 必须给出「开调试端口重启」按钮，而不是让人手抄 param。 */
   const buttons = findAll(filled, (node) => node.type === 'button').map(textOf)
-  assert.ok(buttons.includes('以调试模式重启'), `应出现重启按钮，实际：${buttons.join(' / ')}`)
+  assert.ok(buttons.includes('开调试端口重启'), `应出现重启按钮，实际：${buttons.join(' / ')}`)
 })
 
 test('ClaimSection: captcha 可用时不显示重启按钮', () => {
@@ -371,7 +371,7 @@ test('ClaimSection: 默认关闭时拨盘说明「探测自动、领取手动」
   )
   const text = textOf(tree)
   /** 「自动领取」是拨盘的 aria-label（不渲染成可见文字），可见文本是这句说明。 */
-  assert.match(text, /关闭中：探测仍是自动的/, '关闭时说明探测仍自动、领取手动')
+  assert.match(text, /自动领取已关闭：探测仍然自动/, '关闭时说明探测仍自动、领取手动')
   /** 测试桩把 Toggle 替换成裸 input，所以按 type=checkbox 找拨盘。 */
   const toggles = findAll(tree, (node) => node.type === 'input' && node.props?.type === 'checkbox')
   assert.equal(toggles.length, 1, '要有自动领取拨盘')
@@ -389,7 +389,7 @@ test('ClaimSection: 自动领取开启时显示已开启与已记录数', () => 
   )
   const text = textOf(tree)
   assert.match(text, /已开启/)
-  assert.match(text, /已记录 3 个活动/, '把 seenCount 透出，用户能看出「不会重复领」')
+  assert.match(text, /已记录 3 个/, '把 seenCount 透出，用户能看出「不会重复领」')
 })
 
 test('ClaimSection 源码：展开时自动探测（useEffect + /claimable），探测零成本', () => {
@@ -405,6 +405,28 @@ test('ClaimSection 源码：重启是两段式确认，且明确告知会中断�
   assert.match(claimSectionSrc, /确认重启？会中断任务/, '确认按钮必须写明后果')
   assert.match(claimSectionSrc, /confirm: true/, '调用重启端点要带服务端要求的二次确认')
   assert.match(claimSectionSrc, /中断/, '提示里必须说明重启会中断任务')
+})
+
+/**
+ * ⚠ 0.6.4：「重载插件」与「开调试端口」是两件事。
+ * 旧文案写成「以调试模式重启」，暗示普通模式不能重启 —— 这是错的：
+ * 不带端口重启同样让插件生效，只是 captcha 领不了。
+ */
+test('ClaimSection 源码：普通重启不带端口，调试端口只是可选姿势', () => {
+  const claimSectionSrc = extractFunction('ClaimSection')
+  /** ⚠ 只查字符串字面量：注释里会提到旧文案（讲清为什么改），不算违规。 */
+  assert.doesNotMatch(claimSectionSrc, /'以调试模式重启'|"以调试模式重启"/, '不该再暗示「普通模式不能重启」')
+  assert.match(claimSectionSrc, /restart\('plain'\)/, '提供普通重启（不带端口）')
+  assert.match(claimSectionSrc, /restart\('debug'\)/, '提供带端口重启')
+  assert.match(claimSectionSrc, /debugPort !== undefined/, '普通重启不得传 debugPort')
+})
+
+test('ClaimSection 源码：自动领取「说明在左、开关在右」', () => {
+  const claimSectionSrc = extractFunction('ClaimSection')
+  const textIdx = claimSectionSrc.indexOf('自动领取已')
+  const toggleIdx = claimSectionSrc.indexOf('h(Toggle, {', textIdx)
+  assert.ok(textIdx > 0, '要有自动领取说明文案')
+  assert.ok(toggleIdx > textIdx, '开关必须排在说明文本之后（否则与上方按钮列错位）')
 })
 
 /**

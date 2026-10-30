@@ -358,6 +358,49 @@ test('/restart-cdp: 没有 confirm:true 一律 400，且绝不触发重启', asy
   assert.equal(calls.length, 0, '未确认时绝不能真的去重启宿主')
 })
 
+/**
+ * ⚠ 0.6.4：`debugPort` **省略 = 普通重启**（重载插件，不带调试端口）。
+ * 「重载插件」与「开调试端口」是两件事 —— 旧实现无条件 `?? 9229`，
+ * 等于把「我只想重载插件」偷偷变成「开调试端口」。
+ */
+test('/restart-cdp: 省略 debugPort = 普通重启（不偷偷开调试端口）', async () => {
+  const calls = []
+  const routes = makeManageRoutes({
+    pool,
+    client: {},
+    settings: {},
+    log: () => {},
+    requestRestart: async (options) => calls.push(options),
+  })
+  const res = await call(routes, '/api/zcode-start-plan/restart-cdp', {
+    method: 'POST',
+    body: { confirm: true },
+  })
+  assert.equal(res.status, 200)
+  assert.equal(res.body.ok, true)
+  assert.equal(calls.length, 1)
+  assert.equal('debugPort' in calls[0], false, '普通重启不得给重启实现传 debugPort')
+  assert.equal(res.body.debugPort, undefined, '响应也不该报端口')
+})
+
+test('/restart-cdp: 显式给 debugPort 才开 CDP', async () => {
+  const calls = []
+  const routes = makeManageRoutes({
+    pool,
+    client: {},
+    settings: {},
+    log: () => {},
+    requestRestart: async (options) => calls.push(options),
+  })
+  const res = await call(routes, '/api/zcode-start-plan/restart-cdp', {
+    method: 'POST',
+    body: { debugPort: 9333, confirm: true },
+  })
+  assert.equal(res.status, 200)
+  assert.equal(res.body.debugPort, 9333)
+  assert.equal(calls[0].debugPort, 9333)
+})
+
 test('/restart-cdp: 非法端口给 400，且不触发重启', async () => {
   const calls = []
   const routes = makeManageRoutes({

@@ -351,7 +351,7 @@ window.__ModuleLoader__.load({
        * 任务、未写完的回复都会中断。这条代价必须在点下去之前说清楚，
        * 所以做成两段式：先「重启」→ 变成「确认重启？会中断任务」，再点才执行。
        */
-      const [confirmRestart, setConfirmRestart] = useState(false)
+      const [confirmRestart, setConfirmRestart] = useState(undefined)
       const [togglingAuto, setTogglingAuto] = useState(false)
 
       const patch = (id, next) => setState((prev) => ({ ...prev, [id]: { ...prev[id], ...next } }))
@@ -429,13 +429,19 @@ window.__ModuleLoader__.load({
        * ⚠ 所有 hooks 必须在任何早退之前调用。
        * 0.5.0 曾把 useCallback 放在 `return null` 之后 → 两次渲染 hook 数不一致
        * → React 抛 Rendered fewer hooks than expected → 整个面板白屏。
+       *
+       * @param {'plain' | 'debug'} mode
+       *   `plain` = 普通重启（重载插件即可，不带 CDP 端口）；
+       *   `debug` = 带端口重启（captcha 需要）。
+       *   ⚠ 「重载插件」**不依赖调试模式** —— 这只是两种重启姿势的选择。
        */
-      const restart = useCallback(async () => {
-        setConfirmRestart(false)
+      const restart = useCallback(async (mode = 'debug') => {
+        setConfirmRestart(undefined)
         setRestarting(true)
         try {
+          const debugPort = mode === 'debug' ? captcha?.debugPort ?? 9229 : undefined
           /** `confirm: true` 是服务端要求的二次确认（重启会中断所有任务）。 */
-          const data = await api('/restart-cdp', { debugPort: captcha?.debugPort ?? 9229, confirm: true })
+          const data = await api('/restart-cdp', { ...(debugPort !== undefined ? { debugPort } : {}), confirm: true })
           setState((prev) => ({
             ...prev,
             __restart:
@@ -469,15 +475,24 @@ window.__ModuleLoader__.load({
               : '展开即自动探测活动；日常调用模型不受影响，只有领取需要 captcha',
           ),
           h('span', { className: 'zsp-spacer' }),
+          /**
+           * ⚠ 两件事别混成一件（0.6.4）：
+           *
+           * - **重载插件**：装/更新了插件要让它生效 → 任何模式下重启都行，
+           *   与 `--remote-debugging-port` **毫无关系**；
+           * - **开调试端口**：只为领额度时的 captcha 载体 → 必须带参数。
+           *
+           * 旧文案把前者写成「以调试模式重启」，等于告诉用户「普通模式不能重启」，
+           * 这是错的：不带端口重启同样生效，只是 captcha 领不了。
+           */
           captchaReachable
-            ? null
-            : confirmRestart === true
+            ? confirmRestart === 'plain'
               ? h(
                   'button',
                   {
                     className: 'zsp-btn',
                     'data-danger': 'true',
-                    onClick: () => void restart(),
+                    onClick: () => void restart('plain'),
                     disabled: busy || restarting,
                     title: '重启会关闭整个宿主；所有正在运行的任务都会被中断',
                   },
@@ -487,13 +502,35 @@ window.__ModuleLoader__.load({
                   'button',
                   {
                     className: 'zsp-btn',
-                    onClick: () => setConfirmRestart(true),
+                    onClick: () => setConfirmRestart('plain'),
+                    disabled: busy || restarting,
+                    title: '重载插件（不带调试端口，captcha 领取暂不可用）。⚠ 会中断正在运行的任务。',
+                  },
+                  '重启',
+                )
+            : confirmRestart === 'debug'
+              ? h(
+                  'button',
+                  {
+                    className: 'zsp-btn',
+                    'data-danger': 'true',
+                    onClick: () => void restart('debug'),
+                    disabled: busy || restarting,
+                    title: '重启会关闭整个宿主；所有正在运行的任务都会被中断',
+                  },
+                  restarting ? '重启中…' : '确认重启？会中断任务',
+                )
+              : h(
+                  'button',
+                  {
+                    className: 'zsp-btn',
+                    onClick: () => setConfirmRestart('debug'),
                     disabled: busy || restarting,
                     title:
-                      `${captchaReason ?? '以 --remote-debugging-port 重启宿主'}。` +
+                      `${captchaReason ?? '需要调试端口才能产出 captcha'}。` +
                       '⚠ 重启会中断所有正在运行的任务。',
                   },
-                  '以调试模式重启',
+                  '开调试端口重启',
                 ),
           h(
             'button',
@@ -502,29 +539,29 @@ window.__ModuleLoader__.load({
           ),
         ),
         /**
-         * 自动领取拨盘：**探测永远自动**，领取是可开关项。
-         * 开启 = 定时探测到新活动就自动领取（花掉活动资格 + 一次 captcha）。
+         * 自动领取拨盘：**说明在左、开关在右**（与其他行的「标签 … 控件」同构）。
+         * ⚠ 顺序不能反过来：右对齐是一列，开关放左边会与上面的按钮错位。
          */
         h(
           'div',
           { className: 'zsp-row', style: { alignItems: 'center' } },
+          h(
+            'span',
+            { className: 'zsp-muted', style: { flex: '1 1 auto', minWidth: 0 } },
+            autoClaim?.enabled === true
+              ? `自动领取已开启：定时探测，发现新活动自动领取${
+                  Number.isFinite(autoClaim?.seenCount) && autoClaim.seenCount > 0
+                    ? `（已记录 ${autoClaim.seenCount} 个，不会重复领）`
+                    : ''
+                }`
+              : '自动领取已关闭：探测仍然自动，领取需手动点',
+          ),
           h(Toggle, {
             checked: autoClaim?.enabled === true,
             disabled: busy || togglingAuto,
             onChange: () => void toggleAutoClaim(),
             label: '自动领取',
           }),
-          h(
-            'span',
-            { className: 'zsp-muted' },
-            autoClaim?.enabled === true
-              ? `已开启：定时探测，发现新活动自动领取${
-                  Number.isFinite(autoClaim?.seenCount) && autoClaim.seenCount > 0
-                    ? `（已记录 ${autoClaim.seenCount} 个活动，不会重复领）`
-                    : ''
-                }`
-              : '关闭中：探测仍是自动的（展开即填 plan_id），领取需手动点',
-          ),
         ),
         state.__restart !== undefined ? h('span', { className: 'zsp-muted' }, state.__restart) : null,
         open
