@@ -3,6 +3,67 @@
 本文件记录**每次修复背后的宿主契约**。只看 diff 看不出「为什么不能改回去」，
 所以把约束与症状一起写下来。
 
+## 0.8.0 — 领取链路对齐参考实现（版本门控 + 双来源 + 转发头逐字对齐）
+
+### 来源（用户指路）
+
+参考 [deepseek-harness-codearts](https://gitee.com/iJetLi/deepseek-harness-codearts)
+的 zcode 领取实现（`zcode-upstream.ts` / `zcode-auth.ts`，全部为真机实测结论）。
+
+### 变更
+
+**① 版本门控（最关键 —— 之前「有活动也领不到」）**
+
+`marketing/touch` 与 `billing/claim` 两端点的 `X-ZCode-App-Version` 必须抬到
+≥ **3.16.3**（`zcodeVersionGatedAppVersion`：凭据版本与门控值取较大者）：
+
+| 版本 | 实测（参考实现，真机） |
+|---|---|
+| `3.14.3` | 投放恒空；claim `400 / 1004 no permission`（文案「当前账号或**客户端版本**不满足领取条件」，极易误判成账号没资格） |
+| `3.16.2` | claim `200 / code 0` |
+
+推理路径**不抬**（`3012` 消融矩阵在 3.14.3 取的，无证据不扩大）。脏 `app_version`
+（含换行注入）被 semver 白名单挡住 —— 它原样进 `User-Agent`/`Headers()`。
+
+**② 双来源合并**
+
+`fetchClaimablePlans` = preview（每日赠送包）+ marketing（1024 这类活动**只在投放里**）
+按 planId 合并：preview 优先、只补 marketing 的 `campaignId`（领完要回执）；都按
+priority 降序。
+
+**③ 营销投送解析加固**
+
+- plan 元数据在投送物**镜像多处**（banner.background.args、success_popup.hero.args），
+  递归扫描（深度上限 8）取代写死按钮路径；
+- `grant_units` **求和**（1024 活动两条 entitlement：3 亿 Flash + 2 亿 5.3，
+  只取第一条会少报 2 亿）；不同 unit_type 不混加；
+- popup / banner.success_popup 的按钮也扫（投放 schema 有三种位置）。
+
+**④ confirm 回执门控**
+
+`reportMarketingAction('confirm')` 只在领取成功（`0`/`1003`）后发 —— 不回报服务端
+会**重复投放同一 campaign**，每轮白烧 captcha；失败时绝不发（等于叫服务端别再投了）。
+
+**⑤ API 转发头逐字对齐官方抓包（18 头）**
+
+| 修正 | 旧 → 新 |
+|---|---|
+| `X-Release-Channel` | `stable` → `production` |
+| `X-Platform` | `win32` → `win32-x64` |
+| 新增 | `X-Title` / `X-Os-Version`（os.release 真值）/ `X-ZCode-Agent` / `X-Session-Id`（每账号稳定）/ `X-ZCode-Session-Type` / `X-Request-Id`（每请求）/ `X-ZCode-Trace-Id`（每请求） |
+
+`claimPlan` 的业务码解析认**字符串数字**（`{"code":"3012"}` 此前被 `num()` 吃成
+undefined，风控码整条丢失）。
+
+### 硬约束
+
+| 约束 | 原因 |
+|---|---|
+| marketing/claim 必须抬版本 ≥3.16.3，推理必须不抬 | 两侧各有实测依据，混用两头都坏 |
+| 凭据里的 `app_version` 永不被改写 | 门控只影响请求头 |
+| 会话 id 每账号一个（不能全局常量） | 全局 id 会把多账号轮换关联成「同一会话」 |
+| confirm 只在 0/1003 后发 | 失败时回报 = 白丢投放 |
+| 投送物递归扫描有深度上限 | 服务端可控的任意 JSON，递归必须有界 |
 ## 0.7.1 — 移除账号卡片高亮（聚焦框）
 
 expiry 选号（0.7.0）下「下一个用的账号」是动态计算且随每次余额刷新变化，

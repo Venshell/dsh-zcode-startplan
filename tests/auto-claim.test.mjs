@@ -68,7 +68,7 @@ test('fetchClaimablePlans: 从 marketing/touch 投放按钮里提取 plan_id', a
   assert.equal(seen['X-Client-Language'], 'zh-CN', '服务端按语言过滤投放')
 })
 
-test('fetchClaimablePlans: 同 planId 去重取高优先级；非 claim 按钮忽略', async () => {
+test('fetchClaimablePlans: 同 planId 去重；非 claim 按钮忽略（双来源后同 plan 保留首见 campaign）', async () => {
   const fetchImpl = async () => response(touchResponse([
     delivery({ planId: 'plan-a', campaignId: 'camp-low', priority: 10 }),
     delivery({ planId: 'plan-a', campaignId: 'camp-high', priority: 80 }),
@@ -76,7 +76,13 @@ test('fetchClaimablePlans: 同 planId 去重取高优先级；非 claim 按钮�
   ]))
   const plans = await fetchClaimablePlans(CREDENTIAL, fetchImpl)
   assert.equal(plans.length, 1)
-  assert.equal(plans[0].campaignId, 'camp-high')
+  /**
+   * 0.8.0 对齐参考实现的合并语义：同 planId **preview 优先 / 首见保留**，
+   * 只补 campaignId，不再按 priority 覆盖 —— 领取成功后回执要发到
+   * 「第一次见到它」的那个 campaign。
+   */
+  assert.equal(plans[0].campaignId, 'camp-low')
+  assert.equal(plans[0].priority, 10)
 })
 
 test('fetchClaimablePlans: 非 200 / 坏 JSON / 空投放 → 空数组不抛错', async () => {

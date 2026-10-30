@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { buildZcodeHeaders, nextUtc8DayStartMs, toEpochMs } from '../lib/upstream.js'
+import { buildZcodeHeaders, compareZcodeAppVersion, nextUtc8DayStartMs, toEpochMs, zcodeVersionGatedAppVersion } from '../lib/upstream.js'
 import {
   classifyUpstreamError,
   concurrencyRetryDelayMs,
@@ -290,4 +290,35 @@ test('fetchBalance: 单桶时行为不变（buckets 仍下发，面板走汇总�
   assert.equal(balance.buckets.length, 1)
   assert.equal(balance.remaining, 40)
   assert.equal(balance.total, 100)
+})
+
+// ── 版本门控（0.8.0，参考实现 deepseek-harness-codearts 的实测结论）──
+
+test('版本门控: marketing/claim 的 app_version 与 3.16.3 取较大者', () => {
+  /** 凭据旧版本 → 抬到门控下限（低版本投放恒空、claim 1004）。 */
+  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.14.3' }), '3.16.3')
+  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.16.2' }), '3.16.3')
+  /** 凭据更新 → 用它自己的版本（向前兼容，不降级）。 */
+  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.17.0' }), '3.17.0')
+  /** 缺失/脏值 → 门控下限（脏值还会让 Headers() 抛 TypeError，必须挡住）。 */
+  assert.equal(zcodeVersionGatedAppVersion({}), '3.16.3')
+  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.16.3-beta.1' }), '3.16.3')
+  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.016.3' }), '3.16.3')
+  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.16.3\r\nX-Injected: 1' }), '3.16.3')
+})
+
+test('版本门控: buildZcodeHeaders 的 appVersion 覆盖只影响本次请求头', () => {
+  const cred = { device_mid: 'dev-1', app_version: '3.14.3' }
+  /** 不传 = 凭据版本（推理路径维持既有消融矩阵口径）。 */
+  assert.equal(buildZcodeHeaders(cred)['X-ZCode-App-Version'], '3.14.3')
+  /** 门控路径显式传 = 抬版本，且不改凭据。 */
+  assert.equal(buildZcodeHeaders(cred, { appVersion: zcodeVersionGatedAppVersion(cred) })['X-ZCode-App-Version'], '3.16.3')
+  assert.equal(cred.app_version, '3.14.3', '凭据本身绝不被改写')
+})
+
+test('版本门控: 点分版本比较（缺失段按 0）', () => {
+  assert.equal(compareZcodeAppVersion('3.14.3', '3.16.3'), -1)
+  assert.equal(compareZcodeAppVersion('3.16.3', '3.16.3'), 0)
+  assert.equal(compareZcodeAppVersion('3.17', '3.16.3'), 1)
+  assert.equal(compareZcodeAppVersion('3.16', '3.16.3'), -1)
 })
