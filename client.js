@@ -977,28 +977,47 @@ window.__ModuleLoader__.load({
       const [confirmId, setConfirmId] = useState(undefined)
 
       /**
-       * 统一刷新：/summary 已带每账号余额；个别账号缺失（拉取失败/新入池）
-       * 时再逐个补拉，不再单设「刷新余额」按钮。
+       * 统一刷新：summary **立即返回**账号列表（0.6.7 起不在 summary 里拉余额），
+       * 对 `balance: null` 的账号逐个补拉 `/balance?id=` 懒加载 ——
+       * 列表秒出，单账号余额慢/失败只影响自己那张卡，不再把整个面板挡在「加载中…」。
        */
       const load = useCallback(async () => {
         try {
           const summary = await api('/summary')
           setData(summary)
+          setError(undefined)
+          const accounts = Array.isArray(summary?.accounts) ? summary.accounts : []
           const seeded = {}
-          for (const item of Array.isArray(summary?.accounts) ? summary.accounts : []) {
+          for (const item of accounts) {
             if (item.balance !== null && item.balance !== undefined) {
               seeded[item.id] = { ok: true, ...item.balance }
             } else {
-              /**
-               * summary 对余额并行拉取且失败显式下发 `balance: null`（上游已明确
-               * 不可用）；不再逐个补打 /balance —— 那是对同一端点的重复请求。
-               * 单账号刷新仍走面板「刷新」→ /summary。
-               */
-              seeded[item.id] = { ok: false, error: '余额不可用' }
+              seeded[item.id] = { ok: false, error: '余额加载中…' }
             }
           }
           setBalances(seeded)
-          setError(undefined)
+          /** 并行补拉（每账号独立 fetch，单账号失败/超时不拖累其他）。 */
+          for (const item of accounts) {
+            if (item.balance !== null && item.balance !== undefined) continue
+            /** /balance 是 GET（id 走 query），不走 POST 版 api() 助手。 */
+            void fetch(`${API}/balance?id=${encodeURIComponent(item.id)}`)
+              .then(async (response) => {
+                const data = await response.json().catch(() => ({}))
+                if (!response.ok) throw new Error(typeof data?.error === 'string' ? data.error : `HTTP ${response.status}`)
+                setBalances((prev) => ({
+                  ...prev,
+                  [item.id]: data?.balance !== null && data?.balance !== undefined
+                    ? { ok: true, ...data.balance }
+                    : { ok: false, error: '余额不可用' },
+                }))
+              })
+              .catch((caught) => {
+                setBalances((prev) => ({
+                  ...prev,
+                  [item.id]: { ok: false, error: caught instanceof Error ? caught.message : String(caught) },
+                }))
+              })
+          }
         } catch (caught) {
           setError(caught instanceof Error ? caught.message : String(caught))
         }
