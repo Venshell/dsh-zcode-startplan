@@ -236,6 +236,57 @@ test('autoClaim: 1003（已领过）与 1005（领完）同样入终态', withSt
   assert.equal(autoClaim.stats().seenCount, 2)
 }))
 
+/**
+ * confirm 回执纪律（docs/upstream-protocol.md「领取与活动发现」）：
+ * **只在 `0`/`1003` 后发 `confirm`**。失败时发 = 叫服务端别再投了（白丢机会）；
+ * 成功不发 = 服务端重复投放（每轮白烧 captcha）。
+ */
+test('autoClaim: confirm 只在 0/1003 后发；1005/网络失败绝不发', withStateDir(async (dir) => {
+  const pool = fakePool([
+    { id: 'acct-a', credential: CREDENTIAL },
+    { id: 'acct-b', credential: { ...CREDENTIAL, user_id: 'u-2' } },
+    { id: 'acct-c', credential: { ...CREDENTIAL, user_id: 'u-3' } },
+  ])
+  const confirms = []
+  const autoClaim = createAutoClaim(enabled({
+    pool,
+    client: { mintCaptcha: async () => ({ param: 'p', region: 'cn' }) },
+    fetchClaimablePlans: async (credential) => [
+      { planId: `plan-${credential.user_id}`, campaignId: `camp-${credential.user_id}` },
+    ],
+    claimPlan: async (credential) => {
+      if (credential.user_id === 'u-1') return { ok: true, code: 0 }
+      if (credential.user_id === 'u-2') return { ok: true, code: 1003, alreadyClaimed: true }
+      return { ok: false, code: 1005 }
+    },
+    reportMarketingAction: async (_credential, campaignId) => { confirms.push(campaignId) },
+    stateFile: join(dir, 'state.json'),
+  }))
+  await autoClaim.tick()
+  assert.deepEqual(confirms.sort(), ['camp-u-1', 'camp-u-2'], '0/1003 发 confirm，1005 不发')
+}))
+
+test('autoClaim: 查投放前补活跃上报（不补则 preview 恒空，自动领取静默失效）', withStateDir(async (dir) => {
+  const pool = fakePool()
+  const activations = []
+  let sawPlansFirst = false
+  let activationBeforePlans = true
+  const autoClaim = createAutoClaim(enabled({
+    pool,
+    client: { mintCaptcha: async () => ({ param: 'p', region: 'cn' }) },
+    reportActivation: async () => { activations.push(1) },
+    fetchClaimablePlans: async () => {
+      if (activations.length === 0) activationBeforePlans = false
+      return []
+    },
+    stateFile: join(dir, 'state.json'),
+  }))
+  await autoClaim.tick()
+  assert.equal(activations.length, 1, '每个启用账号每轮补一次')
+  assert.equal(activationBeforePlans, true, 'reportActivation 必须先于 fetchClaimablePlans')
+  assert.equal(sawPlansFirst, false)
+}))
+
 test('autoClaim: 状态文件坏 / 版本不识别 → 空状态起跑；禁用账号跳过', withStateDir(async (dir) => {
   const stateFile = join(dir, 'state.json')
   writeFileSync(stateFile, '{broken json')

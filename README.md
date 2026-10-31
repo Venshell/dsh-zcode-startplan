@@ -6,7 +6,8 @@
 - **每账号一个模型栏位**：固定吃该账号额度；另有「统一选号」自动换号栏
 - **双渠道登录**：`bigmodel`（智谱）/ `zai`（Z.AI），面板内直接发起设备授权
 - **面板内领取赠送额度**：自动探测活动（marketing/touch）、一键领取、可选自动领取
-- **本地 OpenAI 兼容端点**：Codex / Cline 等客户端直接用账号池额度
+- **本地 OpenAI 兼容端点**：Codex / Cline 等客户端直接用账号池额度；
+  **分发 key** 可建多把、各自设 token 限额 / 钉定账号（0.9.4+，主 apiKey 已废除）
 - 零运行时依赖
 
 [![npm](https://img.shields.io/npm/v/dsh-zcode-startplan)](https://www.npmjs.com/package/dsh-zcode-startplan)
@@ -64,7 +65,7 @@ CLI：`node bin/cli.mjs login | list | status | probe | claim | captcha`。
 | [CHANGELOG.md](CHANGELOG.md) | 每个版本修了什么、**每条约束「为什么不能改回去」** |
 | [docs/host-contract.md](docs/host-contract.md) | DSH 宿主契约：inject、适配器三处直接调用、`BlockAssembler` chunk 形状、schemastery、无损 JSON、`webServer` 可选注入——每条都会让插件「看起来加载了、其实不工作」 |
 | [docs/upstream-protocol.md](docs/upstream-protocol.md) | 上游协议硬约束：3012 准入（身份块）、错误码语义、200 包业务错误、活动发现与版本门控、18 个转发头对齐、领取纪律 |
-| [docs/local-endpoints.md](docs/local-endpoints.md) | 本地 OpenAI / Anthropic 端点：配置、鉴权、OpenAI 协议陷阱（null 分片、孤儿 tool 配对） |
+| [docs/local-endpoints.md](docs/local-endpoints.md) | 本地 OpenAI / Anthropic 端点：配置、分发 key 鉴权（0.9.5 起唯一鉴权路径）、OpenAI 协议陷阱（null 分片、孤儿 tool 配对、流式 finish 门禁） |
 | [docs/channels.md](docs/channels.md) | 双通道架构：免费 / coding-plan，换 key 三步、3012 风控与自动切换（分支 `feature/coding-plan-channel`） |
 
 ## 参考项目支持

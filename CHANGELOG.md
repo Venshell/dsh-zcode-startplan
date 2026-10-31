@@ -3,6 +3,98 @@
 本文件记录**每次修复背后的宿主契约**。只看 diff 看不出「为什么不能改回去」，
 所以把约束与症状一起写下来。
 
+## 0.9.8 — API Keys 管理区重构（现代控制台形态）
+
+需求：「API 管理换成更现代的管理方式，目前太简陋了」。
+
+### 旧形态的问题
+
+一条扁平行塞 7 个控件（名字/用量/−/限额/+/状态/钉定/删除）；限额只能 ±100 万
+步进（调到 4.2 亿要点 420 次）；新 key 明文只有一行 code（无复制按钮）；
+删除一键即中、无确认；创建表单三个空输入框常驻面板；空列表零引导。
+
+### 新形态（参照 OpenAI / Anthropic / Linear 控制台的通行模式）
+
+- **卡片化列表**：每把 key 一张卡 —— 头行（状态点 + 名字 + 启用/钉定 chip +
+  创建日期）、用量行、操作行，信息分层不再挤压；
+- **用量进度条**：已用/限额可视化，**≥90% 转危险色**（快用完一眼可见）；
+- **限额编辑**：点「限额：500万」展开预设分段（100万/500万/2000万/不限）+
+  自定义输入 + 保存/取消，取代无级步进；
+- **新 key 强调卡**：成功色描边 + 等宽明文 + 「复制」（clipboard API）+
+  「我已保存」关闭 —— 明文只此一面且不常驻；
+- **两步删除确认**：第一次点只武装（出现实底「确认删除？」），3 秒不确认
+  自动回退；防误触；
+- **创建表单折叠**：收进「+ 新建 API Key」按钮；空列表给「生成第一把」引导。
+
+### 硬约束
+
+| 约束 | 原因 |
+|---|---|
+| 删除必须两步确认 | 一键即中的破坏性操作是误触重灾区；确认态 3 秒自动回退防「忘了关」 |
+| token 明文只在创建响应出现一次（服务端既有契约，不变） | 列表下发明文/掩码 = 泄露或定位失败（0.9.5/0.9.6 两轮教训） |
+| CRUD body 键名 `id`、失败冒泡错误行（0.9.7 契约，不变） | 服务端按 `body.id` 定位；静默 catch 让按钮「没反应」无从排查 |
+| 样式只用宿主主题 token（`--dsw-alias-*`） | 浅色/深色主题都要成立；不 import 任何宿主 Client 包 |
+| 测试的状态化 React 桩必须**重建模块** | 组件闭包绑死构建时的 React —— 复用 FakeReact 版组件时 setState 永远 no-op，两步交互测不出来 |
+
+## 0.9.7 — 双轴审计修复：领取纪律闭环、流式门禁、契约文档对齐
+
+来源：根提交 → 0.9.6 的全量双轴审计（Standards 轴 smell 基线 + Spec 轴官方契约）。
+追加：真实报障「已有的 api 无法删除」——0.9.6 删除修复的漏网之鱼（见硬约束表）。
+
+### Spec 轴（实现与契约相悖，全数修复）
+
+- **confirm 回执双向违背（最重）**：`auto-claim` 对任意领取结果（含 1004/1005
+  失败）都发 `marketing/touch/action confirm`，而手动 `/claim` 成功后**从不**发。
+  纪律（docs/upstream-protocol.md）：**只在 `0`/`1003` 后发** —— 失败时发 =
+  叫服务端别再投了（白丢机会）；成功不发 = 服务端重复投放（每轮白烧 captcha）。
+  现两侧同口径：auto-claim 按 `ok/code` 门禁；`/claim` 接受可选 `campaignId`
+  （面板从 `/claimable` 探测结果带上），成功后发 confirm；
+- **auto-claim 不补活跃上报**：tick 直接查投放，缺 `app_launch` +
+  `app_daily_active` ⇒ `preview` 恒空 ⇒ 每日赠送包永远探测不到，自动领取
+  静默失效（面板/CLI 路径此前已补，唯此路径漏）。tick 现在每账号查投放前
+  先 `reportActivation`；
+- **OpenAI 流式缺 finish 门禁**：非流式有 `ended before finish` 检查，流式
+  `toOpenAiSse` 却在循环结束后无条件发 usage/[DONE] —— 上游半截断开时客户端
+  把半截输出当完整结果持久化。现在流式收尾未见 `finish` 时发 error 帧、
+  不发 usage/[DONE]（与非流式同口径）；
+- **契约文档与实现脱节**：`docs/local-endpoints.md` 改为分发 key 鉴权口径
+  （0.9.5 起主 apiKey 已废除，旧文档仍承诺 `openai-api-key` 文件与
+  `DSH_OPENAI_GATEWAY_API_KEY`）；`docs/host-contract.md` 的
+  `inject = ['llm','tools','timer','webServer']` 更正为三硬依赖 +
+  `webServer` 可选注入（与 index.js 一致）；README 补分发 key 能力声明。
+
+### Standards 轴（smell 基线，判断题择要处理）
+
+- **Duplicated Code**：`plan-client` 的 3009 处理（忙标记→退避→钉定报错→换号）
+  在非 200 与 HTTP-200 两处近乎逐字重复（~25 行×2）→ 提取 `#handleConcurrency`；
+  `anthropic-body` 的 attachment 引用提取两处各写一份 → 共用 `attachmentIdOf`
+  （防两处字段名集合漂移）；两适配器的 `imageRequestPricing` 空实现 → 共用
+  模块级 `imageRequestPricingDefault`（宿主直调契约的注释只留一份）；
+- **Speculative Generality**：删除无调用方的 `/use` 路由（0.7.0 起 expiry
+  选号、面板无「使用」按钮；改顺序统一走 `/reorder`）；删除 `estimatedReadyMs`
+  兼容字段（同包发布的 client.js 从不读它）；清理已废弃的 `requestRestart?`
+  JSDoc；修正 `ZCODE_BILLING_PREVIEW_URL` 的过期注释（0.8.0 双来源合并后
+  `fetchPreviewPlans` 在用，非纯兼容遗留）；
+- **Middle Man**：`buildRestartCommand` 直传引用（去转发 lambda）；
+- **Data Clumps / 配置漂移**：`Config` schema 的默认值投影改为**直接引用
+  `DEFAULT_CONFIG`**（此前两处手写字面量，改一处漏一处即漂移）；
+- **不拆项（审计结论的修正）**：用量三元组 `{inputTokens, outputTokens,
+  requests}` 已由 `distribution-keys.js` 单一模块拥有（建/投影/校验/记账同域），
+  引入新类型属为拆而拆，保留；`client.js` 面板单文件暂保留（拆模块收益不抵
+  装载结构风险，待下次面板功能改动时顺势处理）。
+
+### 硬约束
+
+| 约束 | 原因 |
+|---|---|
+| confirm 只在 `0`/`1003` 后发 | 两个方向都踩过：乱发白丢投放、不发白烧 captcha |
+| 查 preview 前必补活跃上报 | 不补则 preview 恒空（官方启动行为实证） |
+| 流缺 finish 绝不发 usage/[DONE] | 谎报成功会让半截输出被持久化 |
+| `/claim` 不带 campaignId 仍可领取 | 老面板兼容；confirm 缺 campaignId 时静默跳过（`reportMarketingAction` 对空 campaignId 是 no-op） |
+| 分发 key CRUD 请求体键名必须是 `id` | 0.9.6 只改了服务端与调用点，`op()` 序列化仍是 `{token: …}` ⇒ body 里没有 `id` 键 ⇒ 服务端 400「需要 id」，**删除/禁用/限额调节全部失效**且 catch 后静默（真实报障「已有的 api 无法删除」） |
+| 面板 CRUD 失败必须冒泡成错误行 | 静默 catch 让「按钮没反应」无从排查 —— 本次事故的第二半 |
+| **加载时迁移**：0.9.6 前落盘的 key（无 `id`）必须补稳定 id 并立即落盘固化 | 旧 key 是 0.9.6 之前建的，文件里只有 token —— 投影出 `id: undefined`，JSON 丢键，面板永远删不掉（真实报障「已创建的 id 丢失无法删除」）。不在加载时固化的话，重启会给同一把 key 换新 id，「稳定 id」名存实亡 |
+
 ## 0.9.6 — 分发 key 按 id 定位（删除/调节修复）+ 不限额的设限额入口
 
 ### 症状

@@ -106,6 +106,28 @@ window.__ModuleLoader__.load({
        * （13px），补 13px 内边距对齐到同一条竖线。
        */
       .zsp-unified{padding-right:13px}
+      /* ── API Keys 管理区（0.9.8 重构）────────────────────────────── */
+      .zsp-btn[data-primary=true]{background:var(--dsw-alias-state-business-primary);border-color:var(--dsw-alias-state-business-primary);color:#fff}
+      .zsp-btn[data-primary=true]:hover:enabled{opacity:.88}
+      /* 武装中的删除按钮：实底危险色，让「再点一次才删」的态势一眼可见。 */
+      .zsp-btn[data-confirm=true]{background:var(--dsw-alias-label-danger);border-color:var(--dsw-alias-label-danger);color:#fff}
+      /* 分段选择（限额预设）选中态：描边 + 主色文字，不抢实底按钮的权重。 */
+      .zsp-btn[data-selected=true]{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary)}
+      .zsp-keycard{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);border-radius:8px;padding:10px 12px;min-width:0}
+      .zsp-keycard[data-disabled=true]{opacity:.62}
+      .zsp-keyhead{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
+      .zsp-keydate{color:var(--dsw-alias-label-tertiary);font-size:11px;flex:none}
+      .zsp-meter-block{display:flex;flex-direction:column;gap:3px;min-width:0}
+      /* 用量 ≥90%：进度条转危险色 —— 「快用完」要在扫一眼就看到。 */
+      .zsp-bar[data-hot=true]>span{background:var(--dsw-alias-label-danger)}
+      /* 新 key 明文 token 的强调卡：成功色描边，明文等宽可全选。 */
+      .zsp-token-card{display:flex;flex-direction:column;gap:6px;border:1px solid var(--dsw-alias-state-success-primary);border-radius:8px;background:var(--dsw-alias-bg-layer-1);padding:10px 12px;min-width:0}
+      .zsp-token-value{font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:12px;line-height:18px;user-select:all;word-break:break-all;background:var(--dsw-alias-bg-layer-2);border-radius:4px;padding:3px 8px}
+      .zsp-empty{display:flex;flex-direction:column;gap:8px;align-items:flex-start;border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;padding:14px 12px}
+      .zsp-quotafield{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-width:0}
+      .zsp-quota-input{font:inherit;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:2px 8px;width:130px}
+      .zsp-quota-input:focus-visible{outline:none;border-color:var(--dsw-alias-state-business-primary)}
+      .zsp-count{display:inline-flex;align-items:center;border:1px solid var(--dsw-alias-border-l1);border-radius:999px;padding:0 8px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary);flex:none}
       .zsp-toggle{position:relative;display:inline-block;flex:none;width:30px;height:17px;margin-left:auto}
       .zsp-toggle input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}
       .zsp-toggle-track{position:absolute;inset:0;border-radius:999px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);transition:background .15s ease,border-color .15s ease;pointer-events:none}
@@ -370,21 +392,49 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 分发 key 管理区（0.9.4/0.9.5）：生成 / 限额调节 / 禁用 / 删除。
+     * 分发 key 管理区（0.9.8 重构：现代 API key 控制台形态）。
      *
-     * ⚠ token 明文**只在创建响应里出现一次**，前端暂存刚创建的那把，复制后即忘。
-     * 限额用 −/+ 按钮（步进 100 万 tokens）直接调节，不用弹输入框。
+     * 设计参照通行模式（OpenAI/Anthropic/Linear 控制台同款）：
+     * - **卡片化列表**：每把 key 一张卡 —— 名字 + 状态 chip + 创建日期一行，
+     *   用量进度条一行，操作按钮一行；不再是一条扁平行塞 7 个控件；
+     * - **用量可视化**：已用/限额的进度条，≥90% 转危险色；不限额只显示已用；
+     * - **限额预设分段选择**（100万/500万/2000万/不限）+ 自定义输入，取代
+     *   旧版 ±100 万步进（要调到 4.2 亿得点 420 次）；
+     * - **创建后一次性 token 强调卡**：成功色描边 + 「复制」按钮（clipboard）
+     *   + 「我已保存」关闭 —— 明文只此一面，复制即忘；
+     * - **两步删除确认**：第一次点变实底危险「确认删除」，3 秒不点自动回退；
+     * - 创建表单**折叠**进「+ 新建 API Key」按钮，平时不占面板空间。
+     *
+     * ⚠ token 明文**只在创建响应里出现一次**（服务端契约：列表永不下发 token）。
+     * ⚠ CRUD 请求体必须带 `id`（0.9.6 服务端契约）且失败冒泡成错误行（0.9.7）。
      */
     function DistributionKeysSection(props) {
       const { keys, accounts, busy, onChanged } = props
       const [creating, setCreating] = useState(false)
+      /** 新建表单展开态（平时折叠，面板不再被三个空输入框占一行）。 */
+      const [formOpen, setFormOpen] = useState(false)
       const [newName, setNewName] = useState('')
       const [newQuota, setNewQuota] = useState('')
       const [newAccount, setNewAccount] = useState('')
       const [freshToken, setFreshToken] = useState(undefined)
+      const [copied, setCopied] = useState(false)
+      /** CRUD 失败的错误行（此前 catch 后静默，按钮「没反应」无从排查）。 */
+      const [opError, setOpError] = useState(undefined)
+      /** 两步删除：武装中的 key id（3 秒不确认自动回退，CONFIRM_RESET_MS）。 */
+      const [confirmDeleteId, setConfirmDeleteId] = useState(undefined)
+      /** 每把 key 的限额编辑态（点「限额」进入，Escape/确认退出）。 */
+      const [editingQuotaId, setEditingQuotaId] = useState(undefined)
+      const [editingQuotaValue, setEditingQuotaValue] = useState('')
+
+      useEffect(() => {
+        if (confirmDeleteId === undefined) return undefined
+        const timer = setTimeout(() => setConfirmDeleteId(undefined), CONFIRM_RESET_MS)
+        return () => clearTimeout(timer)
+      }, [confirmDeleteId])
 
       const create = async () => {
         setCreating(true)
+        setOpError(undefined)
         try {
           const response = await fetch(`${API}/distribution-keys?op=create`, {
             method: 'POST',
@@ -398,71 +448,206 @@ window.__ModuleLoader__.load({
           const data = await response.json().catch(() => ({}))
           if (response.ok && typeof data?.key?.token === 'string') {
             setFreshToken(data.key.token)
+            setCopied(false)
             setNewName(''); setNewQuota(''); setNewAccount('')
+            setFormOpen(false)
             if (typeof onChanged === 'function') await onChanged()
+          } else {
+            setOpError(typeof data?.error === 'string' ? data.error : `创建失败（HTTP ${response.status}）`)
           }
+        } catch (error) {
+          setOpError(error instanceof Error ? error.message : String(error))
         } finally {
           setCreating(false)
         }
       }
 
-      const op = async (token, opName, body = {}) => {
+      /**
+       * CRUD 操作（禁用/启用、限额调节、删除）。
+       *
+       * ⚠ 0.9.6 的坑：调用点都改成了 `op(key.id, …)`，但这里的序列化键名
+       * 还是 `token` —— 服务端按 `body.id` 定位（token 已不下发），发出的
+       * body 里根本没有 `id` 键 ⇒ 永远 400「需要 id」。且此前 catch 后静默，
+       * 按钮看起来就是「没反应」。键名与服务端契约绑定，错误必须冒泡。
+       */
+      const op = async (id, opName, body = {}) => {
         try {
-          await fetch(`${API}/distribution-keys?op=${opName}`, {
+          const response = await fetch(`${API}/distribution-keys?op=${opName}`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ token, ...body }),
+            body: JSON.stringify({ id, ...body }),
           })
+          const data = await response.json().catch(() => ({}))
+          if (!response.ok || data?.ok !== true) {
+            throw new Error(typeof data?.error === 'string' ? data.error : `HTTP ${response.status}`)
+          }
+          setOpError(undefined)
           if (typeof onChanged === 'function') await onChanged()
-        } finally {
-          // onChanged 会刷新列表；失败静默（列表还在）。
+        } catch (error) {
+          setOpError(error instanceof Error ? error.message : String(error))
+        }
+      }
+
+      /** 复制新 key 明文（clipboard API 失败时降级：明文本就 user-select:all 可手动选）。 */
+      const copyFreshToken = async () => {
+        try {
+          await navigator.clipboard.writeText(freshToken)
+          setCopied(true)
+        } catch {
+          setCopied(false)
         }
       }
 
       if (keys === undefined) return null
+      const keyList = Array.isArray(keys) ? keys : []
       return h(
         'div',
         { className: 'zsp-group' },
+        /** 头部：标题 + 数量 chip + 新建按钮（表单折叠进它）。 */
         h('div', { className: 'zsp-row' },
-          h('span', { className: 'zsp-name' }, '分发 Key'),
+          h('span', { className: 'zsp-name' }, 'API Keys'),
+          h('span', { className: 'zsp-count' }, `${keyList.length} 把`),
           h('span', { className: 'zsp-muted', style: { flex: '1 1 auto' } },
-            '独立计量与限额；额度用尽即拒绝')),
-        h('div', { className: 'zsp-row' },
-          h('input', { className: 'zsp-name-input', placeholder: '备注（给谁）', value: newName, onChange: (e) => setNewName(e.target.value), style: { maxWidth: '140px' } }),
-          h('input', { className: 'zsp-name-input', placeholder: '限额 tokens（空=不限）', value: newQuota, onChange: (e) => setNewQuota(e.target.value), style: { maxWidth: '160px' } }),
-          h('select', { className: 'zsp-name-input', value: newAccount, onChange: (e) => setNewAccount(e.target.value), style: { maxWidth: '170px' } },
-            h('option', { value: '' }, '不限账号（用整个池）'),
-            (accounts ?? []).map((a) => h('option', { key: a.id, value: a.id }, `#${a.index} ${a.nickname}`))),
-          h('button', { className: 'zsp-btn', onClick: () => void create(), disabled: busy || creating }, creating ? '生成中…' : '+ 生成'),
+            '独立计量与限额；额度用尽即拒绝'),
+          h('button', {
+            className: 'zsp-btn',
+            'data-primary': formOpen !== true,
+            onClick: () => setFormOpen(formOpen !== true),
+            disabled: busy,
+          }, formOpen ? '收起' : '+ 新建 API Key'),
         ),
-        freshToken !== undefined
-          ? h('div', { className: 'zsp-row' },
-              h('span', { className: 'zsp-ok' }, '新 key（只显示这一次，复制保存）：'),
-              h('code', { className: 'zsp-plan-id' }, freshToken))
+        formOpen === true
+          ? h('div', { className: 'zsp-add' },
+              h('input', { className: 'zsp-name-input', placeholder: '备注（给谁用）', value: newName, onChange: (e) => setNewName(e.target.value), style: { maxWidth: '200px' } }),
+              h('select', { className: 'zsp-name-input', value: newAccount, onChange: (e) => setNewAccount(e.target.value), style: { maxWidth: '220px' } },
+                h('option', { value: '' }, '不限账号（用整个池）'),
+                (accounts ?? []).map((a) => h('option', { key: a.id, value: a.id }, `#${a.index} ${a.nickname}`))),
+              h('div', { className: 'zsp-quotafield' },
+                h('span', { className: 'zsp-muted' }, '限额：'),
+                h('button', { className: 'zsp-btn', 'data-selected': newQuota === '', onClick: () => setNewQuota(''), disabled: busy }, '不限'),
+                [1_000_000, 5_000_000, 20_000_000].map((preset) =>
+                  h('button', {
+                    className: 'zsp-btn',
+                    'data-selected': newQuota === String(preset),
+                    key: preset,
+                    onClick: () => setNewQuota(String(preset)),
+                    disabled: busy,
+                  }, formatTokens(preset)),
+                ),
+                h('input', {
+                  className: 'zsp-quota-input',
+                  placeholder: '自定义 tokens',
+                  value: newQuota,
+                  onChange: (e) => setNewQuota(e.target.value.replace(/[^\d]/g, '')),
+                }),
+              ),
+              h('button', { className: 'zsp-btn', 'data-primary': true, onClick: () => void create(), disabled: busy || creating },
+                creating ? '生成中…' : '生成'),
+            )
           : null,
-        (Array.isArray(keys) ? keys : []).map((key) =>
-          h('div', { key: key.id, className: 'zsp-row', style: { alignItems: 'center' } },
-            h('span', { className: 'zsp-name' }, key.name),
-            h('span', { className: 'zsp-muted' },
-              `${formatTokens(key.usage.inputTokens + key.usage.outputTokens)} 已用 · ${key.usage.requests} 次`),
-            /** 限额 −/+ 调节（步进 100 万 tokens）；不限额时 − 禁用、+ 设为 500 万起点。 */
-            h('button', { className: 'zsp-btn', disabled: busy || key.quotaTotal === null,
-              onClick: () => void op(key.id, 'update', { quotaTotal: Math.max(100_000, (key.quotaTotal ?? 0) - 1_000_000) }),
-              title: key.quotaTotal === null ? '不限额，不能下调' : '-100万' }, '−'),
-            h('span', { className: 'zsp-muted', style: { minWidth: '86px', textAlign: 'center' } },
-              key.quotaTotal === null ? '不限' : formatTokens(key.quotaTotal)),
-            h('button', { className: 'zsp-btn', disabled: busy,
-              onClick: () => void op(key.id, 'update', { quotaTotal: key.quotaTotal === null ? 5_000_000 : (key.quotaTotal ?? 0) + 1_000_000 }),
-              title: key.quotaTotal === null ? '设为 500万' : '+100万' }, key.quotaTotal === null ? '设限额' : '+'),
-            h('span', { className: 'zsp-chip', 'data-limited': key.enabled !== true }, key.enabled ? '启用' : '已禁用'),
-            key.accountId
-              ? h('span', { className: 'zsp-chip' }, `钉定 #${(accounts ?? []).find((a) => a.id === key.accountId)?.nickname ?? key.accountId.slice(0, 8)}`)
-              : null,
-            h('span', { className: 'zsp-spacer' }),
-            h('button', { className: 'zsp-btn', onClick: () => void op(key.id, 'update', { enabled: key.enabled !== true }), disabled: busy },
-              key.enabled ? '禁用' : '启用'),
-            h('button', { className: 'zsp-btn', 'data-danger': 'true', onClick: () => void op(key.id, 'delete'), disabled: busy }, '删除'),
-          )),
+        /** 新 key 明文强调卡：只此一面，带复制 + 已保存关闭。 */
+        freshToken !== undefined
+          ? h('div', { className: 'zsp-token-card' },
+              h('span', { className: 'zsp-ok' }, '新 key 已生成 —— 现在复制保存，关闭后无法再次查看：'),
+              h('code', { className: 'zsp-token-value' }, freshToken),
+              h('div', { className: 'zsp-row' },
+                h('button', { className: 'zsp-btn', 'data-primary': copied !== true, onClick: () => void copyFreshToken() },
+                  copied ? '已复制 ✓' : '复制'),
+                h('button', { className: 'zsp-btn', onClick: () => setFreshToken(undefined) }, '我已保存'),
+              ),
+            )
+          : null,
+        opError !== undefined
+          ? h('div', { className: 'zsp-row' },
+              h('span', { className: 'zsp-error', 'data-error': 'true',
+                title: '点此忽略', onClick: () => setOpError(undefined) }, `分发 key 操作失败：${opError}`))
+          : null,
+        keyList.length === 0 && freshToken === undefined
+          ? h('div', { className: 'zsp-empty' },
+              h('span', { className: 'zsp-muted' }, '还没有 API Key —— 网关开启后，所有请求都需要一把 key 鉴权。'),
+              h('button', { className: 'zsp-btn', 'data-primary': true, onClick: () => setFormOpen(true), disabled: busy }, '生成第一把'),
+            )
+          : null,
+        keyList.map((key) => {
+          const used = (key.usage.inputTokens ?? 0) + (key.usage.outputTokens ?? 0)
+          const limited = key.quotaTotal !== null && key.quotaTotal !== undefined
+          const percent = limited && key.quotaTotal > 0 ? Math.min(100, Math.round((used / key.quotaTotal) * 100)) : 0
+          const hot = limited && percent >= 90
+          const accountName = key.accountId
+            ? ((accounts ?? []).find((a) => a.id === key.accountId)?.nickname ?? `#${String(key.accountId).slice(0, 8)}`)
+            : null
+          const confirmingDelete = confirmDeleteId === key.id
+          const editingQuota = editingQuotaId === key.id
+          return h('div', { key: key.id, className: 'zsp-keycard', 'data-disabled': key.enabled !== true },
+            /** 行 1：名字 + 状态 chip + 钉定 chip + 创建日期。 */
+            h('div', { className: 'zsp-keyhead' },
+              h('span', { className: 'zsp-dot', 'data-on': key.enabled === true }),
+              h('span', { className: 'zsp-name' }, key.name),
+              h('span', { className: 'zsp-chip', 'data-limited': key.enabled !== true }, key.enabled ? '启用' : '已禁用'),
+              accountName !== null ? h('span', { className: 'zsp-chip' }, `钉定 ${accountName}`) : null,
+              h('span', { className: 'zsp-spacer' }),
+              h('span', { className: 'zsp-keydate' },
+                `创建于 ${new Date(key.createdAt).toLocaleDateString([], { month: 'numeric', day: 'numeric' })}`),
+            ),
+            /** 行 2：用量进度条 + 数值。 */
+            h('div', { className: 'zsp-meter-block' },
+              h('div', { className: 'zsp-bar', 'data-hot': hot === true },
+                h('span', { style: { width: `${limited ? percent : Math.min(100, Math.round((used / 10_000_000) * 100))}%` } })),
+              h('span', { className: 'zsp-muted' },
+                limited
+                  ? `${formatTokens(used)} / ${formatTokens(key.quotaTotal)} tokens · ${key.usage.requests} 次请求`
+                  : `${formatTokens(used)} tokens 已用 · 不限额 · ${key.usage.requests} 次请求`),
+            ),
+            /** 行 3：操作。限额编辑态展开为预设分段 + 自定义输入；删除两步确认。 */
+            h('div', { className: 'zsp-actions' },
+              editingQuota
+                ? h('div', { className: 'zsp-quotafield' },
+                    h('button', { className: 'zsp-btn', 'data-selected': editingQuotaValue === '', onClick: () => setEditingQuotaValue(''), disabled: busy }, '不限'),
+                    [1_000_000, 5_000_000, 20_000_000].map((preset) =>
+                      h('button', {
+                        className: 'zsp-btn',
+                        'data-selected': editingQuotaValue === String(preset),
+                        key: preset,
+                        onClick: () => setEditingQuotaValue(String(preset)),
+                        disabled: busy,
+                      }, formatTokens(preset)),
+                    ),
+                    h('input', {
+                      className: 'zsp-quota-input',
+                      placeholder: '自定义 tokens',
+                      value: editingQuotaValue,
+                      onChange: (e) => setEditingQuotaValue(e.target.value.replace(/[^\d]/g, '')),
+                    }),
+                    h('button', {
+                      className: 'zsp-btn', 'data-primary': true, disabled: busy,
+                      onClick: () => {
+                        void op(key.id, 'update', { quotaTotal: editingQuotaValue.trim().length > 0 ? Number(editingQuotaValue) : null })
+                        setEditingQuotaId(undefined)
+                      },
+                    }, '保存'),
+                    h('button', { className: 'zsp-btn', onClick: () => setEditingQuotaId(undefined) }, '取消'),
+                  )
+                : h('button', {
+                    className: 'zsp-btn', disabled: busy,
+                    onClick: () => { setEditingQuotaId(key.id); setEditingQuotaValue(key.quotaTotal === null || key.quotaTotal === undefined ? '' : String(key.quotaTotal)) },
+                  }, `限额：${limited ? formatTokens(key.quotaTotal) : '不限'}`),
+              h('button', {
+                className: 'zsp-btn', disabled: busy,
+                onClick: () => void op(key.id, 'update', { enabled: key.enabled !== true }),
+              }, key.enabled ? '禁用' : '启用'),
+              h('span', { className: 'zsp-spacer' }),
+              confirmingDelete
+                ? h('button', {
+                    className: 'zsp-btn', 'data-confirm': true, disabled: busy,
+                    onClick: () => { setConfirmDeleteId(undefined); void op(key.id, 'delete') },
+                  }, '确认删除？')
+                : h('button', {
+                    className: 'zsp-btn', 'data-danger': true, disabled: busy,
+                    onClick: () => setConfirmDeleteId(key.id),
+                  }, '删除'),
+            ),
+          )
+        }),
       )
     }
 
@@ -527,14 +712,19 @@ window.__ModuleLoader__.load({
       const claim = useCallback(
         async (id) => {
           /** plan_id 只来自探测结果 —— 没有手输路径（见渲染处注释）。 */
-          const planId = state[id]?.plans?.[0]?.planId
-          if (typeof planId !== 'string' || planId.length === 0) {
+          const target = state[id]?.plans?.find((plan) => plan.claimed !== true) ?? state[id]?.plans?.[0]
+          if (typeof target?.planId !== 'string' || target.planId.length === 0) {
             patch(id, { error: '当前没有探测到可领取的活动' })
             return
           }
           patch(id, { loading: true, error: undefined, results: undefined })
           try {
-            const data = await api('/claim', { id, planId })
+            /** campaignId：领取成功后服务端要 confirm 回执（0.9.7），探测结果里带着。 */
+            const data = await api('/claim', {
+              id,
+              planId: target.planId,
+              ...(typeof target.campaignId === 'string' ? { campaignId: target.campaignId } : {}),
+            })
             patch(id, { loading: false, results: Array.isArray(data.results) ? data.results : [] })
             /** 领取会改变余额（或生成 pending），刷新面板让进度条同步。 */
             if (typeof onClaimed === 'function') await onClaimed()

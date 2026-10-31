@@ -253,6 +253,23 @@ test('toOpenAiSse: 上游错误帧 + 不抛异常', async () => {
   assert.equal(frames[0].error.message, '额度用尽')
 })
 
+/**
+ * ⚠ finish 门禁的**流式侧**（0.9.7 补齐，与非流式 collectChatCompletion 同口径）：
+ * 流结束但没收到 finish chunk = 上游半截断开。此时发 usage/[DONE] 会让客户端
+ * 把半截输出当完整结果持久化 —— 必须发 error chunk 且不发 usage 帧。
+ */
+test('toOpenAiSse: 流缺 finish 时发 error 帧，不发 usage/[DONE] 假装成功', async () => {
+  const frames = parseSse(await drain(toOpenAiSse(
+    [{ type: 'text-delta', index: 0, text: '半截' }, { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } }],
+    'id', 'm',
+  )))
+  assert.equal(frames.length, 2, 'text-delta 一帧 + error 一帧，无 usage 帧')
+  assert.equal(frames[0].choices[0].delta.content, '半截')
+  assert.equal(frames[1].choices.length, 0)
+  assert.match(frames[1].error.message, /ended before finish/)
+  assert.equal(frames[1].error.code, 'upstream_error')
+})
+
 test('collectChatCompletion: 折叠成 chat.completion（content + tool_calls + usage）', async () => {
   const payload = await collectChatCompletion([
     { type: 'text-delta', index: 0, text: '答' },

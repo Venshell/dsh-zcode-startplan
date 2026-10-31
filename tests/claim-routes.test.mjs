@@ -112,12 +112,16 @@ const marketingTouchBody = {
 
 /** 假上游：按 URL 分发，并记录 captcha 头，供断言「每个 plan 都重新 mint」。 */
 function makeUpstream({ claimCodes = [0, 0], captchaFails = false } = {}) {
-  const calls = { claim: [], captchaHeaders: [], touch: 0, report: 0 }
+  const calls = { claim: [], captchaHeaders: [], touch: 0, report: 0, confirms: [] }
   let claimIndex = 0
   const fetchImpl = async (url, init = {}) => {
     const target = String(url)
     if (target.includes('/event/report')) {
       calls.report += 1
+      return new Response(JSON.stringify({ code: 0 }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    if (target.includes('/marketing/touch/action')) {
+      calls.confirms.push(JSON.parse(init.body).campaign_id)
       return new Response(JSON.stringify({ code: 0 }), { status: 200, headers: { 'content-type': 'application/json' } })
     }
     if (target.includes('/marketing/touch')) {
@@ -291,6 +295,38 @@ test('/claim: 1005（领完）原样回传业务码，不吞成含糊失败', as
   assert.equal(res.body.ok, false)
   assert.equal(res.body.results[0].code, 1005, '业务码必须原样回传，供面板如实显示')
   assert.equal(res.body.results[0].httpStatus, 200)
+})
+
+/**
+ * confirm 回执纪律（docs/upstream-protocol.md）：**只在 `0`/`1003` 后发**。
+ * 成功不发 = 服务端重复投放（每轮白烧 captcha）；失败发 = 白丢投放机会。
+ * 手动 /claim 此前从不发 —— 与 auto-claim 一起在 0.9.7 补齐。
+ */
+test('/claim: 成功（0/1003）后发 marketing confirm；失败（1005）不发', async () => {
+  const { fetchImpl, client, calls } = makeUpstream({ claimCodes: [0, 1003, 1005] })
+  const routes = buildRoutes(client)
+  const post = (planId, campaignId) => call(routes, '/api/zcode-start-plan/claim', {
+    method: 'POST',
+    body: { id: 'acc-1', planId, ...(campaignId !== undefined ? { campaignId } : {}) },
+  })
+  await withGlobalFetch(fetchImpl, async () => {
+    await post('plan-a', 'camp-a')
+    await post('plan-b', 'camp-b')
+    await post('plan-c', 'camp-c')
+    await post('plan-d')
+  })
+  assert.deepEqual(calls.confirms, ['camp-a', 'camp-b'], '0/1003 各发一次 confirm，带探测给的 campaignId')
+  assert.equal(calls.claim.length, 4, '1005 与缺 campaignId 的请求照样领取，只是不发回执')
+})
+
+test('/claim: 不带 campaignId 也能领取（老面板兼容），只是不发 confirm', async () => {
+  const { fetchImpl, client, calls } = makeUpstream({ claimCodes: [0] })
+  const routes = buildRoutes(client)
+  const res = await withGlobalFetch(fetchImpl, () =>
+    call(routes, '/api/zcode-start-plan/claim', { method: 'POST', body: { id: 'acc-1', planId: 'plan-high' } }),
+  )
+  assert.equal(res.body.ok, true)
+  assert.deepEqual(calls.confirms, [])
 })
 
 test('/claimable: 账号不存在给 404；未知路径不会误配', async () => {

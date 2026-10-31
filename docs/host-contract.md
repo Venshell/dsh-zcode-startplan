@@ -17,7 +17,9 @@ ctx.tools                   → 抛错 "cannot get property "tools" without inje
 不需要执行模块），但**工具与模型全都没有**；宿主只往 stderr 打一条 warning，
 打包态下 stderr 被丢弃 —— 所以什么都看不到。
 
-⇒ 本插件 `inject = ['llm', 'tools', 'timer', 'webServer']`，一个都不多。
+⇒ 本插件 `inject = ['llm', 'tools', 'timer']`（三个硬依赖，一个都不多）；
+`webServer` 走**可选注入**（见下文「账号面板路由」——写进硬 inject 会在
+headless profile 挂起整个 fiber，0.4.4 的教训）。
 
 ## 宿主对适配器有**三处不带可选调用保护**的直接调用
 

@@ -291,20 +291,24 @@ export function validateConfig(value) {
   return out
 }
 
+/**
+ * Config 契约的默认值投影：**直接引用 `DEFAULT_CONFIG`**，同一组默认值只写一份
+ * （此前两处手写字面量，改一处漏一处就会「schema 显示的默认」与「运行时默认」漂移）。
+ */
 export const Config = makeConfigSchema(validateConfig, {
-  provider: PROVIDER,
-  displayName: 'ZCode Start Plan（赠送免费 plan）',
-  models: [...DEFAULT_MODELS],
-  accountProviders: true,
-  selectionOrder: 'expiry',
-  modelCacheMs: 10 * 60_000,
-  dataDir: '',
-  channel: 'cn',
-  captcha: { mode: 'cdp', debugPort: 9229, origin: 'https://zcode.z.ai/' },
-  endpoint: { enabled: false, port: 17_899 },
-  openaiGateway: { enabled: false, port: 17_900 },
-  autoClaim: { enabled: false, intervalMs: 30 * 60_000 },
-  statusTool: true,
+  provider: DEFAULT_CONFIG.provider,
+  displayName: DEFAULT_CONFIG.displayName,
+  models: [...DEFAULT_CONFIG.models],
+  accountProviders: DEFAULT_CONFIG.accountProviders,
+  selectionOrder: DEFAULT_CONFIG.selectionOrder,
+  modelCacheMs: DEFAULT_CONFIG.modelCacheMs,
+  dataDir: DEFAULT_CONFIG.dataDir,
+  channel: DEFAULT_CONFIG.channel,
+  captcha: { ...DEFAULT_CONFIG.captcha },
+  endpoint: { ...DEFAULT_CONFIG.endpoint },
+  openaiGateway: { ...DEFAULT_CONFIG.openaiGateway },
+  autoClaim: { ...DEFAULT_CONFIG.autoClaim },
+  statusTool: DEFAULT_CONFIG.statusTool,
 })
 
 /**

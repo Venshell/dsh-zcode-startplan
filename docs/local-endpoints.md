@@ -13,8 +13,10 @@
 openaiGateway: { enabled: true, port: 17900 }
 ```
 
-apiKey：`~/.dsh/zcode-start-plan/openai-api-key`（43 位 base64url，首启自动生成），
-或环境变量 `DSH_OPENAI_GATEWAY_API_KEY`（优先）。
+鉴权（0.9.5 起）：**只认分发 key**（面板「OpenAI 网关」区创建，可设限额与
+账号钉定；明细见 CHANGELOG 0.9.4–0.9.6）。主 apiKey 已废除 ——
+`openai-api-key` 文件与 `DSH_OPENAI_GATEWAY_API_KEY` 环境变量已移除；
+一把分发 key 都没有时网关拒绝所有请求（401）。
 
 ## Anthropic 端点（pi-ai 回落路线）
 
@@ -48,7 +50,7 @@ apiKey：`~/.dsh/zcode-start-plan/openai-api-key`（43 位 base64url，首启自
 | 分片带空 `function.name` | 清空已解析的工具名 → `unknown tool ""` | 只接受非空覆盖 |
 | 空 assistant（调用被剔光） | 变 wire 上的**空开头发言** ⇒ 上游 `model_param_invalid` | 整条剔除；**正文非空的保留**（那是用户真看到的内容） |
 | 上游 `{status:200}` 表业务失败 | 「额度用尽」被客户端读成**成功** | 状态码门禁 400–599 |
-| 流缺 `finish` | 半截输出被当完整结果持久化 | 报错 `ended before finish`，不假装成功 |
+| 流缺 `finish` | 半截输出被当完整结果持久化 | **流式与非流式同口径**：`toOpenAiSse` 收尾时未见 `finish` 则发 error chunk、不发 usage/[DONE]；非流式抛 `ended before finish`（0.9.7 补齐流式侧） |
 | `tool_choice: required` / 指名函数 | DSH 侧表达不出来 | 直接 400，不静默降级（客户端会误以为约束生效） |
 
 映射口径：
@@ -61,13 +63,16 @@ apiKey：`~/.dsh/zcode-start-plan/openai-api-key`（43 位 base64url，首启自
   官方明细字段必须给（标准客户端只认官方形态），`prompt_cache_hit_tokens`
   作为私有兼容字段保留（真有缓存命中才发）
 
-## apiKey 安全策略
+## 分发 key 安全策略
 
-- **文件内容异常时报错而不是静默换 key**：静默换会让所有已配置客户端同时 401，
-  用户只看到 "unauthorized"，无从判断是自己粘错了哪一位还是服务端变了。
-  形态判据（定长 43 位 `[A-Za-z0-9_-]`）让「损坏」与「用户自己换过」可机械区分
+- **主 apiKey 已废除（0.9.5，用户决策）**：单 key 无法承载「多客户端各配各的
+  限额与账号」，且它是绕过分发 key 限额的后门。网关只认分发 key
+- 列表**永不携带 token**（明文或掩码）：每条 key 有稳定公开 `id`（`dk_` 前缀），
+  CRUD 按 id 定位；明文 token 只在创建响应里出现一次
+- 用量记账在**生成器内部旁路观察** usage chunk：并发消费同一生成器会互相抢帧
+  （实测：记账协程吃掉 head 的 reasoning 帧，客户端丢内容）
 - `/health` 不校验 key：探活工具不该持凭据
-- 日志与错误里**永不打印** apiKey（它会被贴进配置文件和 bug 报告）
+- 日志与错误里**永不打印** token（它会被贴进配置文件和 bug 报告）
 
 ## 已踩过的实现 bug
 

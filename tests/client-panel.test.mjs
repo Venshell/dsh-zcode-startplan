@@ -74,6 +74,65 @@ const SOURCE = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
 const FakeReact = makeReact()
 
 /**
+ * 带状态的假 React：useState 真存值，重渲染时读到更新后的值。
+ *
+ * 只为两步交互（如删除确认）的行为级测试服务 —— 默认桩的 setState 是 no-op，
+ * 「点了删除 → 出现确认按钮」这种跨渲染的状态变化模拟不出来。
+ * ⚠ state 槽按 hook 序号全局共享，单组件树内使用（跨组件会串位）。
+ */
+function makeStatefulReact() {
+  const h = (type, props, ...children) => ({
+    type,
+    props: props ?? {},
+    children: children.flat().filter((child) => child !== null && child !== undefined && child !== false),
+  })
+  let hookCount = 0
+  let expectedHookCount
+  const slots = []
+  return {
+    createElement: h,
+    Fragment: Symbol('Fragment'),
+    useState: (initial) => {
+      const i = hookCount
+      hookCount += 1
+      if (slots[i] === undefined) slots[i] = { value: typeof initial === 'function' ? initial() : initial }
+      return [
+        slots[i].value,
+        (next) => {
+          slots[i].value = typeof next === 'function' ? next(slots[i].value) : next
+        },
+      ]
+    },
+    useEffect: () => {
+      hookCount += 1
+    },
+    useRef: (initial) => {
+      const i = hookCount
+      hookCount += 1
+      if (slots[i] === undefined) slots[i] = { value: initial }
+      return { current: slots[i].value }
+    },
+    useCallback: (fn) => {
+      hookCount += 1
+      return fn
+    },
+    __hooks: {
+      begin: (expected) => {
+        expectedHookCount = expected
+        hookCount = 0
+      },
+      end: () => {
+        if (expectedHookCount !== undefined && hookCount !== expectedHookCount) {
+          throw new Error(`渲染之间 hook 数量变化：${expectedHookCount} → ${hookCount}（React 会抛 Rendered fewer hooks than expected）`)
+        }
+        expectedHookCount = hookCount
+        return hookCount
+      },
+    },
+  }
+}
+
+/**
  * 从源码里抠出一个函数定义（按名 + 括号配平）。
  *
  * 不能用 `function NAME(props)` 定位：辅助函数签名各异
@@ -103,14 +162,17 @@ function buildPanel() {
   const card = extractFunction('AccountCard')
   const claimSection = extractFunction('ClaimSection')
   const totalQuota = extractFunction('TotalQuota')
+  const distKeys = extractFunction('DistributionKeysSection')
   /**
    * 桩件：NicknameEdit / Toggle / api 用最简实现替代（它们的渲染不是本测试的主题），
    * `h`/`Fragment` 从 fake React 取。
+   * `fetch` 可由测试注入（默认抛错，防止测试意外打真端点）。
    */
   const code = `
     const h = React.createElement
     const Fragment = React.Fragment
     const { useState, useCallback, useEffect } = React
+    const API = '/api/zcode-start-plan'
     const api = async () => ({ ok: true, plans: [] })
     function NicknameEdit(props) { return h('span', null, props.nickname) }
     function Toggle() { return h('input', { type: 'checkbox' }) }
@@ -119,11 +181,31 @@ function buildPanel() {
     ${card}
     ${claimSection}
     ${totalQuota}
-    return { AccountCard, QuotaMeter, ClaimSection, TotalQuota, formatEffective, formatPendingUnits, formatRemaining, formatTokens }
+    ${distKeys}
+    return { AccountCard, QuotaMeter, ClaimSection, TotalQuota, DistributionKeysSection, formatEffective, formatPendingUnits, formatRemaining, formatTokens }
   `
   // eslint-disable-next-line no-new-func
   const mod = new Function('React', code)(FakeReact)
-  return { ...mod, React: FakeReact, render: (node) => resolve(node, FakeReact) }
+  /** 组件闭包绑死了构建时的 React —— 状态化渲染必须**用它自己的 React 重建模块**。 */
+  const buildModuleWith = (react) => new Function('React', code)(react)
+  return {
+    ...mod,
+    React: FakeReact,
+    render: (node) => resolve(node, FakeReact),
+    /**
+     * 状态化渲染：返回「用同一个带 useState 的 React 重渲染」的帮手（两步交互用）。
+     * ⚠ 组件闭包绑死构建时的 React，所以这里用状态化 React **重新构建**一份模块
+     * （组件源码相同，仅 React 实例不同）；state 槽存在该 React 内，跨 renderOnce 保持。
+     */
+    renderStateful: (makeNode) => {
+      const react = makeStatefulReact()
+      const statefulMod = buildModuleWith(react)
+      /** makeNode 引用的组件也必须来自 statefulMod，否则又是 FakeReact 版组件。 */
+      const node = makeNode(statefulMod)
+      const renderOnce = () => resolve(node, react)
+      return { renderOnce, react }
+    },
+  }
 }
 
 /** 在渲染树里找所有 className 含 needle 的节点。 */
@@ -558,4 +640,144 @@ test('TotalQuota: 全部未加载 / 无账号时不渲染', () => {
   const panel = buildPanel()
   assert.equal(panel.TotalQuota({ accounts: [], balances: {} }), null)
   assert.equal(panel.render(panel.TotalQuota({ accounts: [{ id: 'a' }], balances: { a: { ok: false, error: 'x' } } })), null)
+})
+
+/**
+ * ⚠ 0.9.6 的真实 bug（面板「删除没用」）：
+ *
+ * 0.9.6 把 CRUD 定位改成稳定 `id`（服务端按 `body.id` 找，token 不再下发），
+ * 调用点都改成了 `op(key.id, …)`，但 `op()` 的序列化键名**还是 `token`** ——
+ * 发出的 body 里没有 `id` 键 ⇒ 服务端永远 400「需要 id」⇒ 删除/禁用/限额调节
+ * 全部失效，且 `op()` catch 后静默，按钮看起来就是「没反应」。
+ *
+ * 本用例就是当时的缺口：面板测试从没断言过「组件发出的请求体」与服务端的
+ * 契约。这里用真 fetch 桩捕获请求体，并**用服务端同款判据**（按 `body.id`
+ * 定位）验证删除真正生效；失败必须出现错误行而不是静默。
+ */
+test('DistributionKeysSection: op() 按 body.id 定位（服务端契约），两步删除生效；失败显示错误行', async () => {
+  const calls = []
+  const keyRow = {
+    id: 'dk_test01',
+    name: '给台式机',
+    quotaTotal: 5_000_000,
+    accountId: null,
+    enabled: true,
+    createdAt: 0,
+    usage: { inputTokens: 0, outputTokens: 0, requests: 0 },
+    remaining: 5_000_000,
+  }
+  let deleted = false
+  /** ⚠ 保存/还原原值：本仓库 runner 单进程跑全部测试，直接置 undefined 会毒化后续文件。 */
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body)
+    calls.push({ url: String(_url), body })
+    /** 服务端同款判据：按 body.id 定位（manage-routes distKeysHandler）。 */
+    const found = body.id === keyRow.id
+    if (new URLSearchParams(String(_url).split('?')[1]).get('op') === 'delete') {
+      if (found) deleted = true
+      return new Response(JSON.stringify(found ? { ok: true } : { ok: false, error: '分发 key 不存在' }), { status: found ? 200 : 404 })
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 200 })
+  }
+  try {
+    const panel = buildPanel()
+    let changed = 0
+    /**
+     * 带状态的重渲染：两步删除需要「武装后确认按钮真的出现」。
+     * ⚠ 必须包装成**元素节点**（type=函数）再交给 resolve —— 直接调用组件的话
+     * resolve 走不到「函数组件」分支，hook 计数不会归零，第二次渲染会读到
+     * 全新初始化的 state 槽（武装值凭空丢失，假阴性）。
+     */
+    const makeNode = (statefulMod) => ({
+      type: statefulMod.DistributionKeysSection,
+      props: { keys: [keyRow], accounts: [], busy: false, onChanged: async () => { changed += 1 } },
+      children: [],
+    })
+    const { renderOnce } = panel.renderStateful(makeNode)
+    const findDelete = (tree) => findAll(tree, (n) => n.props?.['data-danger'] === true)[0]
+    const findConfirm = (tree) => findAll(tree, (n) => textOf(n).includes('确认删除？')).at(-1)
+    let tree = renderOnce()
+    const firstDelete = findDelete(tree)
+    assert.notEqual(firstDelete, undefined, '每张卡有删除按钮（data-danger）')
+    await firstDelete.props.onClick()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(deleted, false, '第一步只武装，绝不发删除请求（防误触）')
+    assert.equal(changed, 0, '武装不刷新列表')
+    /** 武装后重渲染：确认按钮出现，点它才真删。 */
+    tree = renderOnce()
+    const confirmButton = findConfirm(tree)
+    assert.notEqual(confirmButton, undefined, '武装后出现「确认删除？」按钮')
+    await confirmButton.props.onClick()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(deleted, true, '服务端按 body.id 找到了该 key —— 删除真正生效')
+    assert.equal(changed, 1, '成功后刷新列表')
+    assert.deepEqual(
+      calls.map((c) => Object.keys(c.body).sort()),
+      [['id']],
+      '请求体必须带 id 键（0.9.6 前发的键名是 token，服务端读不到）',
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
+  /** 失败路径：服务端 404 ⇒ op() 必须把错误交给 setOpError（渲染错误行），不许静默。 */
+  globalThis.fetch = async () => new Response(JSON.stringify({ ok: false, error: '分发 key 不存在' }), { status: 404 })
+  try {
+    const panel = buildPanel()
+    const tree = panel.render(panel.DistributionKeysSection({ keys: [keyRow], accounts: [], busy: false, onChanged: async () => {} }))
+    const deleteButton = findAll(tree, (n) => n.props?.['data-danger'] === true)[0]
+    /** 桩 React 的 setState 是 no-op（不重渲染），这里只验证调用不抛。 */
+    await deleteButton.props.onClick()
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+  const src = extractFunction('DistributionKeysSection')
+  assert.match(src, /分发 key 操作失败/, 'op 失败必须渲染错误行（不许 catch 后静默）')
+  assert.match(src, /body: JSON\.stringify\(\{ id, \.\.\.body \}\)/, '序列化键名必须是 id（服务端按 body.id 定位）')
+  assert.match(src, /setOpError\(/, '失败必须进 state（0.9.6 的事故形态：catch 后什么都不做）')
+})
+
+/** 0.9.8 重构的形态闸：卡片化 / 用量条 / 一次性 token 卡 / 折叠表单 / 限额预设。 */
+test('DistributionKeysSection: 现代 API key 管理形态（卡片 + 用量条 + token 强调卡 + 两步删除）', () => {
+  const panel = buildPanel()
+  const keyRow = {
+    id: 'dk_test02',
+    name: '给台式机',
+    quotaTotal: 5_000_000,
+    accountId: null,
+    enabled: true,
+    createdAt: new Date('2026-10-31T00:00:00Z').getTime(),
+    usage: { inputTokens: 4_800_000, outputTokens: 100_000, requests: 12 },
+    remaining: 100_000,
+  }
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(JSON.stringify({ ok: true }), { status: 200 })
+  try {
+    const tree = panel.render(panel.DistributionKeysSection({ keys: [keyRow], accounts: [], busy: false, onChanged: async () => {} }))
+    /** 卡片化：key 行是卡片不是扁平行。 */
+    const card = findAll(tree, (n) => n.props?.className === 'zsp-keycard')[0]
+    assert.notEqual(card, undefined, '每把 key 一张卡片（zsp-keycard）')
+    assert.equal(card.props['data-disabled'], false, '启用中的卡不带降透明度标记')
+    /** 用量进度条：4.9M/5M = 98% ≥ 90% ⇒ 热态危险色。 */
+    const bar = findAll(card, (n) => n.props?.className === 'zsp-bar')[0]
+    assert.equal(bar.props['data-hot'], true, '用量 ≥90% 进度条转危险色')
+    const text = textOf(tree)
+    assert.match(text, /490万 \/ 500万 tokens · 12 次请求/, '已用/限额/请求数一行读全')
+    /** 两步删除在渲染层成立：data-danger 的删除按钮存在，确认按钮只在武装后出现。 */
+    assert.equal(findAll(tree, (n) => n.props?.['data-danger'] === true).length, 1, '初始只有普通删除按钮')
+    assert.doesNotMatch(text, /确认删除？/, '未武装时不显示确认按钮')
+    /** 空状态引导。 */
+    const empty = panel.render(panel.DistributionKeysSection({ keys: [], accounts: [], busy: false, onChanged: async () => {} }))
+    assert.match(textOf(empty), /还没有 API Key/, '空列表给引导文案')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+  const src = extractFunction('DistributionKeysSection')
+  assert.match(src, /zsp-token-card/, '新 key 走强调卡（成功色描边 + 复制按钮）')
+  assert.match(src, /navigator\.clipboard\.writeText/, 'token 有复制按钮')
+  assert.match(src, /我已保存/, '强调卡有关闭动作（明文不常驻）')
+  assert.match(src, /\+ 新建 API Key/, '创建表单折叠进按钮（平时不占面板）')
+  assert.match(src, /confirmDeleteId/, '删除两步确认（武装 id state）')
+  assert.match(src, /formatTokens\(preset\)/, '限额用预设分段选择')
 })
