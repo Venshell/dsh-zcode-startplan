@@ -487,10 +487,66 @@ test('ClaimSection 源码：重启只给指引，不再替用户执行', () => {
   const claimSectionSrc = extractFunction('ClaimSection')
   /** 0.6.6：杀进程重启被 AV 判毒，且脚本会被宿主 Job Object 连带杀死 → 只给命令。 */
   assert.doesNotMatch(claimSectionSrc, /confirmRestart/, '不应再有杀进程式二次确认（端点已只返回命令）')
-  assert.match(claimSectionSrc, /__restart:\s*data\?\.\s*command/, '展示服务端返回的启动命令')
-  assert.match(claimSectionSrc, /__restartNote/, '展示说明（普通重启 / 带端口）')
+  assert.match(claimSectionSrc, /data\?\.\s*command/, '展示服务端返回的启动命令')
+  assert.match(claimSectionSrc, /Note/, '展示说明（普通重启 / 带端口）')
   assert.match(claimSectionSrc, /restart\('plain'\)/, '普通重启指引（不带端口）')
   assert.match(claimSectionSrc, /restart\('debug'\)/, '带端口重启指引')
+})
+
+/**
+ * ⚠ 2026-11-02：启动命令必须**贴着**它对应的提示行。
+ *
+ * 旧实现把命令块挂在整组最底部（拨盘下方），而「连不上调试端口」这行字在顶部：
+ * 用户要复制的东西在几百像素之外，还得自己判断「底部这条是哪一份指引」。
+ * 另外 `__restart` 是单一槽位，普通/带端口两份指引会互相顶替。
+ */
+test('ClaimSection：带端口命令紧贴提示行，且与普通重启指引分槽互不顶替', () => {
+  const src = extractFunction('ClaimSection')
+  assert.ok(src.indexOf('restartGuide(') > 0, '要有统一的命令块渲染器 restartGuide(slot)')
+  assert.ok(src.includes('__restartDebug'), '带端口一份')
+  assert.match(src, /restartGuide\('__restartPlain'\)/, '普通重启一份')
+  assert.doesNotMatch(src, /state\.__restart(?![DP])/, '不应再读写单一的 __restart 槽（会互相顶替）')
+})
+
+/** 把渲染树摊成文本序列（按渲染顺序），用来断言「谁在谁旁边」。 */
+function flattenText(node) {
+  if (node === null || node === undefined || typeof node === 'boolean') return []
+  if (typeof node === 'string' || typeof node === 'number') return [String(node)]
+  return (node.children ?? []).flatMap(flattenText)
+}
+
+test('ClaimSection：未点按钮时不展示任何启动命令（命令是点出来的，不是默认刷屏）', () => {
+  const panel = buildPanel()
+  const tree = panel.render(
+    panel.ClaimSection({
+      accounts: [{ id: 'a1', index: 1, nickname: 'ACC', enabled: true }],
+      busy: false,
+      captcha: { reachable: false, debugPort: 9229, reason: '连不上调试端口' },
+    }),
+  )
+  const sequence = flattenText(tree)
+  assert.ok(sequence.some((t) => t.includes('连不上宿主调试端口')), '载体不可用要有一句提示，写清端口')
+  assert.ok(!sequence.some((t) => t.includes('--remote-debugging-port')), '未点按钮不该出现命令块')
+  assert.ok(
+    sequence.some((t) => t.includes('127.0.0.1:9229')),
+    '提示句要写出探测的是哪个端口（用户据此判断改哪个环境变量）',
+  )
+})
+
+test('ClaimSection：载入带端口指引后，命令紧跟在提示句下方', () => {
+  const panel = buildPanel()
+  /** 用一个能把 __restartDebug 预置进去的渲染：直接渲染 restartGuide 的产物形状。 */
+  const src = extractFunction('ClaimSection')
+  /** 提示行同一容器内紧跟命令块（源码级断言，避免依赖状态注入的复杂度）。 */
+  const hintIdx = src.indexOf('连不上宿主调试端口')
+  const guideIdx = src.indexOf("restartGuide('__restartDebug')", hintIdx)
+  assert.ok(hintIdx > 0 && guideIdx > hintIdx, '带端口命令必须排在提示句之后')
+  /** 命令块与提示句之间不能隔出别的行组件（h('div', {className:'zsp-row'}…)）。 */
+  const between = src.slice(hintIdx, guideIdx)
+  assert.doesNotMatch(between, /className: 'zsp-row'/, '中间不能插入新的行容器')
+  /** 拨盘必须在命令块之后（说明命令没被挪到组底部）。 */
+  const toggleIdx = src.indexOf('h(Toggle, {', guideIdx)
+  assert.ok(toggleIdx > guideIdx, '命令块整体在拨盘之前')
 })
 
 /**
@@ -634,6 +690,47 @@ test('TotalQuota: 汇总各账号余额桶、按到期日分层、跳过未加�
   /** 两条分层（到期日不同：明天 与 1 小时后）。 */
   const bars = findAll(tree, (n) => n.props?.className === 'zsp-bar')
   assert.equal(bars.length, 2, '两个到期日 = 两条分层进度条')
+})
+
+test('TotalQuota: 未生效（pending）额度也计入总额度，但单独分层、不并进「现在可用」', () => {
+  const panel = buildPanel()
+  const now = Date.now()
+  const tree = panel.render(panel.TotalQuota({
+    accounts: [{ id: 'a' }, { id: 'b' }],
+    balances: {
+      a: { ok: true, remaining: 300_000_000, total: 300_000_000, buckets: [
+        { remaining: 300_000_000, total: 300_000_000, expiresAt: now + 3_600_000 },
+      ] },
+      b: {
+        ok: true,
+        buckets: [{ remaining: 0, total: 0, expiresAt: now + 3_600_000 }],
+        pending: [
+          { planId: 'p1', showName: 'GLM-5.3-Flash', grantUnits: 300_000_000, effectiveAt: now + 86_400_000, expiresAt: now + 7 * 86_400_000 },
+        ],
+      },
+    },
+  }))
+  const text = textOf(tree)
+  /** 分母 = 3 亿（已生效）+ 3 亿（待生效）；分子仍是此刻能花的 3 亿。 */
+  assert.match(text, /3亿 \/ 6亿 tokens/, '待生效额度进分母')
+  assert.match(text, /其中待生效 3亿/, '标题行标出待生效份额')
+  assert.match(text, /3亿 tokens 待生效/, '待生效单独一行')
+  assert.match(text, /起可用/, '待生效行要写生效时间')
+  /** 分条：1 条实色（已生效分层）+ 1 条条纹（待生效分层），不能合并成一条。 */
+  const bars = findAll(tree, (n) => n.props?.className === 'zsp-bar')
+  assert.equal(bars.length, 2, '已生效与待生效各一条，不合并')
+  assert.equal(bars.filter((n) => n.props?.['data-pending'] === true).length, 1, '待生效那条带条纹标记')
+})
+
+test('TotalQuota: 只有未生效额度（余额桶为空）也要显示总额度', () => {
+  const panel = buildPanel()
+  const now = Date.now()
+  const tree = panel.render(panel.TotalQuota({
+    accounts: [{ id: 'a' }],
+    balances: { a: { ok: true, buckets: [], pending: [{ grantUnits: 500_000_000, effectiveAt: now + 3_600_000 }] } },
+  }))
+  assert.notEqual(tree, null, '余额为 0 但有待生效额度时要渲染')
+  assert.match(textOf(tree), /0 \/ 5亿 tokens/, '分子 0、分母含待生效')
 })
 
 test('TotalQuota: 全部未加载 / 无账号时不渲染', () => {

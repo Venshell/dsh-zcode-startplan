@@ -5,8 +5,10 @@
 #   provider / displayName  DSH 里的路由名与展示名（与 llm-pi-ai 的路由不能重名）
 #   models                  暴露给 DSH 的模型 id（与上游目录求交集）
 #   accountProviders        true = 每个启用账号一个独立 provider 栏位（可在面板关统一栏）
-#   captcha.debugPort       宿主 Electron 的 CDP 端口（DSH 桌面端需以
-#                           --remote-debugging-port=9229 启动；captcha 用它产出）
+#   captcha.debugPort       宿主 Electron 的 CDP 端口。宿主必须**先彻底退出**再用
+#                           & "D:\software\dsh\DeepSeek Harness.exe" --remote-debugging-port=9229
+#                           重开（单实例锁：旧实例在时参数不生效）；改端口要同步设
+#                           ZCODE_START_PLAN_CDP_PORT，面板提示里也有这条命令
 #   captcha.mode            cdp = 自动产出；manual = 只认人工粘贴（见 CLI）
 #   endpoint.enabled        true 才启动本地 Anthropic 端点（仅 llm-pi-ai 回落路线需要）
 #   statusTool              是否注册 zcode_start_plan_status 工具

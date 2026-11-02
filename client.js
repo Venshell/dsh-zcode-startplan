@@ -774,13 +774,23 @@ window.__ModuleLoader__.load({
         try {
           const debugPort = mode === 'debug' ? captcha?.debugPort ?? 9229 : undefined
           const data = await api('/restart-cdp', { ...(debugPort !== undefined ? { debugPort } : {}) })
+          /**
+           * ⚠ 按 mode 分槽存：普通重启指引和带端口指引**不能互相覆盖**。
+           * `__restart` 旧实现是单一槽位，点过「重启指引」再点「开调试端口重启」
+           * 会互相顶替，用户看到的那条命令与当前提示语境对不上。
+           */
+          const slot = mode === 'debug' ? '__restartDebug' : '__restartPlain'
           setState((prev) => ({
             ...prev,
-            __restart: data?.command ?? '未拿到重启指引（请查看插件日志）',
-            __restartNote: data?.note,
+            [slot]: data?.command ?? '未拿到重启指引（请查看插件日志）',
+            [`${slot}Note`]: data?.note,
           }))
         } catch (caught) {
-          setState((prev) => ({ ...prev, __restart: `获取指引失败：${caught instanceof Error ? caught.message : String(caught)}` }))
+          const slot = mode === 'debug' ? '__restartDebug' : '__restartPlain'
+          setState((prev) => ({
+            ...prev,
+            [slot]: `获取指引失败：${caught instanceof Error ? caught.message : String(caught)}`,
+          }))
         } finally {
           setRestarting(false)
         }
@@ -789,7 +799,24 @@ window.__ModuleLoader__.load({
       if (!Array.isArray(accounts) || accounts.length === 0) return null
 
       const captchaReachable = captcha !== undefined && captcha.reachable === true
-      const captchaReason = captcha?.reason
+
+      /**
+       * 启动命令展示块：**只在这条提示旁边**出现。
+       *
+       * ⚠ 这些命令是「一份提示配一份上下文」，不能孤零零挂在组底部：
+       * 用户看到的是「连不上调试端口」这行字，要复制的东西就得在它旁边，
+       * 否则得来回滚动、还得自己判断该用哪一条。
+       */
+      const restartGuide = (slot) =>
+        state[slot] !== undefined
+          ? h(
+              'div',
+              { className: 'zsp-restart-guide' },
+              h('div', { className: 'zsp-muted' }, state[`${slot}Note`] ?? '请手动完成重启：'),
+              /** 命令用 code 块展示（user-select:all，点一下全选，方便复制）。 */
+              h('code', { className: 'zsp-plan-id' }, state[slot]),
+            )
+          : null
 
       return h(
         'div',
@@ -833,8 +860,8 @@ window.__ModuleLoader__.load({
                   onClick: () => void restart('debug'),
                   disabled: busy || restarting,
                   title:
-                    `${captchaReason ?? '需要调试端口才能产出 captcha'}。` +
-                    '点击获取带调试端口的启动命令（由你手动执行）。',
+                    `${captcha?.reason ?? '需要宿主带调试端口启动才能产出 captcha'}。` +
+                    '点击获取可直接复制的启动命令（由你手动执行）。',
                 },
                 restarting ? '获取中…' : '开调试端口重启',
               ),
@@ -844,6 +871,23 @@ window.__ModuleLoader__.load({
             open ? '收起' : '领取',
           ),
         ),
+        /**
+         * 载体不可用时，**提示句 + 启动命令紧贴在一起**（一句话 + 下面一行可复制命令）。
+         * 提示句本身不重复按钮 tooltip 那串长文案：它太长，塞进行内会把按钮挤走。
+         */
+        captchaReachable
+          ? null
+          : h(
+              'div',
+              { className: 'zsp-row', style: { alignItems: 'flex-start', flexDirection: 'column', gap: '2px' } },
+              h(
+                'span',
+                { className: 'zsp-muted', title: captcha?.reason ?? undefined },
+                `连不上宿主调试端口 127.0.0.1:${captcha?.debugPort ?? 9229}：` +
+                '先彻底退出 DSH 再带端口重开（日常对话不受影响）。',
+              ),
+              restartGuide('__restartDebug'),
+            ),
         /**
          * 自动领取拨盘：**说明在左、开关在右**（与其他行的「标签 … 控件」同构）。
          * ⚠ 顺序不能反过来：右对齐是一列，开关放左边会与上面的按钮错位。
@@ -869,15 +913,11 @@ window.__ModuleLoader__.load({
             label: '自动领取',
           }),
         ),
-        state.__restart !== undefined
-          ? h(
-              'div',
-              { className: 'zsp-restart-guide' },
-              h('div', { className: 'zsp-muted' }, state.__restartNote ?? '请手动完成重启：'),
-              /** 命令用 code 块展示（user-select:all，点一下全选，方便复制）。 */
-              h('code', { className: 'zsp-plan-id' }, state.__restart),
-            )
-          : null,
+        /**
+         * 载体已就绪时，只有**用户主动点「重启指引」**才在拨盘下方出普通重启命令；
+         * 带端口那份永远贴着上面的提示行，两份互不顶替（按 mode 分槽）。
+         */
+        restartGuide('__restartPlain'),
         open
           ? accounts.map((account) => {
               const slot = state[account.id] ?? {}
@@ -955,9 +995,16 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 池子**总额度**行（0.9.3，置顶）：把各账号已加载的余额桶求和，
-     * 按「到期时间分层」显示 —— 快过期的一组、日重置的一组，一眼看出
-     * 「多少能用多久」。数据源与账号卡片同源（balances），未加载完的账号不计入。
+     * 池子**总额度**行（0.9.3 置顶，0.10.0 纳入未生效额度）：把各账号已加载的
+     * 余额桶求和，按「到期时间分层」显示 —— 快过期的一组、日重置的一组。
+     *
+     * 为什么未生效的（`pending`，已领没到点）也要算进总额度：用户问的是
+     * 「池子一共有多少 token」，不是「此刻能立刻花多少」。漏掉 pending 时，
+     * 领取成功的 3 亿包在到点前完全不计入，总额度看起来像没领到。
+     * 但两者语义不同（一个现在就能用，一个要等到点），所以：
+     * - 分母 = 已生效 total + 未生效 grantUnits，分子只算**现在可用**的剩余；
+     * - 未生效部分按**生效日**单独分层（带条纹），不提前并进现有分层 ——
+     *   否则「3 亿 / 3 亿」出现在一个今天到期的层里，读起来像马上就能花。
      */
     function TotalQuota(props) {
       const { accounts, balances } = props
@@ -968,7 +1015,10 @@ window.__ModuleLoader__.load({
       if (entries.length === 0) return null
       /** 按到期日分层：同一天到期的桶合并成一组（日重置桶全部落在 23:59）。 */
       const byDay = new Map()
+      /** 未生效额度按生效日分层（`expiresAt` 还是整份 plan 的作废时间）。 */
+      const pendingByDay = new Map()
       let loaded = 0
+      let pendingUnits = 0
       for (const balance of entries) {
         const buckets = Array.isArray(balance.buckets) && balance.buckets.length > 0
           ? balance.buckets
@@ -989,11 +1039,32 @@ window.__ModuleLoader__.load({
           }
           byDay.set(day, entry)
         }
+        for (const item of Array.isArray(balance.pending) ? balance.pending : []) {
+          const units = Number(item?.grantUnits)
+          if (!Number.isFinite(units) || units <= 0) continue
+          pendingUnits += units
+          const effectiveAt = typeof item.effectiveAt === 'number' && item.effectiveAt > 0 ? item.effectiveAt : undefined
+          const key = effectiveAt === undefined ? '—' : new Date(effectiveAt).toISOString().slice(0, 10)
+          const entry = pendingByDay.get(key) ?? { units: 0, effectiveAt: undefined, expiresAt: undefined }
+          entry.units += units
+          if (effectiveAt !== undefined) {
+            entry.effectiveAt = entry.effectiveAt === undefined ? effectiveAt : Math.min(entry.effectiveAt, effectiveAt)
+          }
+          if (typeof item.expiresAt === 'number' && item.expiresAt > 0) {
+            entry.expiresAt = entry.expiresAt === undefined ? item.expiresAt : Math.min(entry.expiresAt, item.expiresAt)
+          }
+          pendingByDay.set(key, entry)
+        }
       }
-      if (loaded === 0) return null
+      if (loaded === 0 && pendingUnits <= 0) return null
       const groups = [...byDay.entries()].sort((a, b) => (a[1].expiresAt ?? Infinity) - (b[1].expiresAt ?? Infinity))
+      const pendingGroups = [...pendingByDay.entries()]
+        .sort((a, b) => (a[1].effectiveAt ?? Infinity) - (b[1].effectiveAt ?? Infinity))
+      /** 分子只有已经能花的；分母含待生效 —— 否则「待生效」那几行等于没进总额度。 */
       const totalRemaining = groups.reduce((sum, [, g]) => sum + g.remaining, 0)
-      const totalAll = groups.reduce((sum, [, g]) => sum + g.total, 0)
+      const activeAll = groups.reduce((sum, [, g]) => sum + g.total, 0)
+      const totalAll = activeAll + pendingUnits
+      const pendingLabel = pendingUnits > 0 ? ` · 其中待生效 ${formatTokens(pendingUnits)}` : ''
       return h(
         'div',
         { className: 'zsp-group zsp-total' },
@@ -1004,7 +1075,7 @@ window.__ModuleLoader__.load({
           h(
             'span',
             { className: 'zsp-muted' },
-            `${formatTokens(totalRemaining)} / ${formatTokens(totalAll)} tokens · ${entries.length}/${accounts.length} 个账号已加载`,
+            `${formatTokens(totalRemaining)} / ${formatTokens(totalAll)} tokens${pendingLabel} · ${entries.length}/${accounts.length} 个账号已加载`,
           ),
         ),
         groups.map(([day, group]) =>
@@ -1020,6 +1091,26 @@ window.__ModuleLoader__.load({
                 h('span', { style: { width: `${group.total > 0 ? Math.max(0, Math.min(100, Math.round((group.remaining / group.total) * 100))) : 0}%` } })),
               h('span', { className: 'zsp-muted zsp-meter-caption' },
                 `${formatTokens(group.remaining)} / ${formatTokens(group.total)}`),
+            ),
+          ),
+        ),
+        /**
+         * 未生效额度单独分层：条纹 + 生效时间。与上方实色分层并排的用意是
+         * 「总额度里有多少还没到点」一眼可见 —— 合并进同一层会误导成现在可花。
+         */
+        pendingGroups.map(([key, group]) =>
+          h(
+            'div',
+            { key: `pending-${key}`, className: 'zsp-row', style: { paddingLeft: '18px' } },
+            h('span', { className: 'zsp-muted', style: { minWidth: '150px' } },
+              `${group.effectiveAt === undefined ? '待生效' : `${formatEffective(group.effectiveAt)} 起可用`}`),
+            h(
+              'div',
+              { className: 'zsp-meter', style: { flex: '1 1 auto' } },
+              h('div', { className: 'zsp-bar', 'data-pending': true },
+                h('span', { style: { width: '100%' } })),
+              h('span', { className: 'zsp-muted zsp-meter-caption' },
+                `${formatTokens(group.units)} tokens 待生效${group.expiresAt === undefined ? '' : ` · ${formatEffective(group.expiresAt)} 到期`}`),
             ),
           ),
         ),

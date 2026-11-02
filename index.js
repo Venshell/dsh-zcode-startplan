@@ -100,7 +100,13 @@ const DEFAULT_CONFIG = Object.freeze({
   captcha: Object.freeze({
     /** 'cdp' = 用宿主 Electron 产出（默认）；'manual' = 由人工粘贴 param（见 CLI）。 */
     mode: 'cdp',
-    /** 宿主调试端口（DSH 桌面端需以 --remote-debugging-port 启动）。 */
+    /**
+     * 宿主调试端口（captcha 载体用）。
+     *
+     * 宿主必须显式以 `--remote-debugging-port=<同值>` 启动；DSH 桌面端有
+     * **单实例锁**，旧实例还在时再启动只会聚焦旧窗口、参数被丢弃。
+     * 改这个值时要同步设环境变量 ZCODE_START_PLAN_CDP_PORT。
+     */
     debugPort: 9229,
     /** captcha 页面 origin（必须是真实 https origin，否则二次 mint 必失败）。 */
     origin: 'https://zcode.z.ai/',

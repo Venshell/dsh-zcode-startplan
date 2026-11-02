@@ -28,11 +28,18 @@
 2. 模型选择器选 **「ZCode Start Plan」**（统一选号，快过期先用）或
    **「ZCode Start Plan · <昵称>」**（钉定单账号）
 3. 领取赠送额度：面板「赠送额度」区展开即探测活动；领取要 captcha，
-   **宿主需带调试端口启动**（面板按钮给出可复制的命令）：
+   **宿主需带调试端口启动**。面板在那句提示旁边就有可复制的命令：
 
    ```powershell
-   & "<DSH 安装路径>\DeepSeek Harness.exe" --remote-debugging-port=9229
+   & "D:\software\dsh\DeepSeek Harness.exe" --remote-debugging-port=9229
    ```
+
+   - 路径是插件**探测到的绝对路径**（`D:\software\dsh` → `%LOCALAPPDATA%\Programs` →
+     `%ProgramFiles%`），探不到才显示占位符让你补全；
+   - 必须先**彻底退出** DSH：宿主是单实例的，旧实例还在时新进程只会聚焦旧窗口，
+     `--remote-debugging-port` 不生效；
+   - `&` 前缀不能省（否则 PowerShell 报「意外的标记 remote-debugging-port」）；
+   - 端口被占就改数字，并同步设 `ZCODE_START_PLAN_CDP_PORT` 或 `config.captcha.debugPort`。
 
    > 调试端口**日常对话不需要**——captcha 按需触发，只有领取是硬性要求。
 

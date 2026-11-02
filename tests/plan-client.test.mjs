@@ -358,17 +358,71 @@ test('账号池为空 → QUOTA 并提示登录命令', async () => {
   )
 })
 
-test('401 凭据失效 → AUTH，不换号', async () => {
+test('401 凭据失效 → 同账号撞满 2 次后换号；单账号池 → 归为 QUOTA 类终态', async () => {
+  let calls = 0
   const client = new ZcodePlanClient({
     pool: fakePool(),
     minter: fakeMinter(),
-    fetchImpl: async () => response(401, '{"code":1002}', 'application/json'),
+    fetchImpl: async () => {
+      calls += 1
+      return response(401, '{"code":1002}', 'application/json')
+    },
   })
   await assert.rejects(
     () => client.call({ options: baseOptions }),
     (error) => {
-      assert.equal(error.code, 'AUTH')
+      /** 0.9.9 韧性语义：auth 不再当场 throw —— 撞满 2 次换号；单账号池
+       * 选不到下一个号，按最后失败原因（非并发）归 QUOTA 终态。 */
+      assert.equal(error.code, 'QUOTA')
+      assert.match(error.message, /凭据失效|1002/)
       return true
     },
   )
+  assert.equal(calls, 2, '同账号失败两次（1 < 2 不换，第 2 次触发换号）')
+})
+
+test('0.9.9 韧性：统一选号下 any-error 两连败自动换号（压缩调用 + 主请求各撞一次也能活）', async () => {
+  const pool = fakePool([
+    { id: 'acct-a', credential: CREDENTIAL },
+    { id: 'acct-b', credential: { ...CREDENTIAL, user_id: 'u-2' } },
+  ])
+  /** acct-a 永远 500（other 类）；acct-b 正常 —— 模拟压缩调用 + 主请求
+   * 两次都先撞上坏账号的真实形态。 */
+  let call = 0
+  const client = new ZcodePlanClient({
+    pool,
+    minter: fakeMinter(),
+    fetchImpl: async () => {
+      call += 1
+      return call <= 2 ? response(500, 'upstream boom', 'text/plain') : response(200, textStream())
+    },
+  })
+  const result = await client.call({ options: baseOptions })
+  assert.equal(result.accountId, 'acct-b', '第 3 发落到健康账号')
+  assert.equal(call, 3, 'acct-a 恰好两连败后换号')
+})
+
+test('0.9.9 韧性：3012 风控仍然绝不重试、绝不换号（冷却惩罚优先于韧性）', async () => {
+  let calls = 0
+  const pool = fakePool([
+    { id: 'acct-a', credential: CREDENTIAL },
+    { id: 'acct-b', credential: { ...CREDENTIAL, user_id: 'u-2' } },
+  ])
+  const client = new ZcodePlanClient({
+    pool,
+    minter: fakeMinter(),
+    fetchImpl: async () => {
+      calls += 1
+      return response(403, '{"code":3012,"msg":"unusual activity"}', 'application/json')
+    },
+  })
+  await assert.rejects(
+    () => client.call({ options: baseOptions }),
+    (error) => {
+      assert.equal(error.code, 'RATE_LIMIT')
+      assert.match(error.message, /3012/)
+      return true
+    },
+  )
+  assert.equal(calls, 1, '3012 有账号冷却惩罚：一次即停，韧性兜底不覆盖它')
 })
