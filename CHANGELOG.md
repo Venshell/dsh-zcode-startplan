@@ -3,6 +3,158 @@
 本文件记录**每次修复背后的宿主契约**。只看 diff 看不出「为什么不能改回去」，
 所以把约束与症状一起写下来。
 
+## 1.0.0 — 模型列表旁显示「当前使用账号」（实时）
+
+需求：「在模型列表旁边增加当前使用账号，实时的，因为统一选号会自动路由」。
+
+### 外观：照抄 workbuddy 积分徽标（不要药丸）
+
+第一版做成了「描边 + 圆角药丸 + 绿点」，与相邻的模型选择器抢视觉重心。
+workbuddy 的徽标其实是一段**注释级**的文字，逐条对齐它的内联样式：
+
+| 属性 | 值 | 说明 |
+|---|---|---|
+| 外层 wrapper | `inline-flex` + `translateY(2px)` + `marginRight:-8` | 与相邻控件基线对齐 |
+| 按钮 | `height:30` `padding:0 6px` `border:0` `borderRadius:8` `background:transparent` | **无外框** |
+| 文字 | `fontSize:11` `lineHeight:16px` `color:var(--dsw-alias-label-tertiary)` | 注释级，不抢重心 |
+
+用**内联样式**而不是 CSS 类：composer 插槽与面板是两套上下文，
+内联样式不依赖 `<style>` 的注入时机，也不会闪一下默认外观。
+
+| 约束 | 原因 |
+|---|---|
+| 不能有描边 / 背景 / 药丸圆角 | 会读成一个独立控件，与模型选择器抢重心 |
+| 字号 11 + tertiary 色 | 与 workbuddy 同一「注释」语域，才像同一套 UI |
+| 状态圆点去掉 | 颜色已由文字表达；多一个点是多余装饰 |
+| 换号反馈改成文字变色 | 不加背景块，避免抢注意 |
+
+### 真正的根因：`cannot get property "remote.session" without inject`
+
+CDP 挂上宿主、开 Console 域、重新执行 bundle，抓到唯一一条本插件错误：
+
+```
+[dsh-zcode-start-plan] model directory lookup failed:
+Error: cannot get property "remote.session" without inject
+    at Proxy.directoryFor (…/dsh-client-ui-model-selection/client.js)
+```
+
+`ctx.modelDirectories.directoryFor()` **内部**要用 `sessions` / `remote` /
+`remote.session`（`ModelDirectoryResolver` 自己的 `static inject`）。宿主 ctx
+是**沙箱 façade**，只挂**本 fiber 声明过**的服务，所以这一调用在 Proxy 上就抛。
+它发生在 `slots.register({ inject: (sessionId) => … })` 的 props 回调里，
+被 `try/catch` 吞掉后返回 `{}` → 组件拿不到 directory → 永远渲染 null。
+
+修复：`ctx.inject(...)` 一起声明内部依赖：
+
+```js
+ctx.inject(['modelDirectories', 'remote', 'remote.session'], (scope) => { … })
+```
+
+同时 `client.inject` 补 `@deepseek-ai/dsh-api-remotes`（提供 `remote` 服务，
+保证加载顺序在调用前）。
+
+| 约束 | 原因 |
+|---|---|
+| `ctx.inject` 必须声明**被调服务自己依赖的服务** | 沙箱 façade 只挂本 fiber 声明过的；不声明就在调用处抛 |
+| `client.inject` 必须含 `dsh-api-remotes` | 否则 `remote` 可能还没就绪 |
+| `client.inject` 必须含 `dsh-client-ui-conversation` | 它声明 `conversation.input.right`；`slots.inject` 对未声明槽**静默等待**，永不执行回调 |
+| 故障必须打日志 | 这个 bug 因为一开始没有 `console.error` 才拖了两轮；现在失败一定留痕 |
+
+> 之前两轮的判断都是错的：「未声明槽注册会抛错」「inject 回调抛错是主因」。
+> 真正的机制是 **沙箱 façade 的 inject 拦截**，与插槽声明无关。
+
+### 之前那一版的记录（已被上面的实测推翻，保留作教训）
+
+### 「徽标不出现」的真正根因：`client.inject` 少了两个包
+
+用 CDP 连上宿主页面，读 `window.__DSH_BOOT__.entries` 对比实测：
+
+```json
+// workbuddy（能显示积分）
+"inject": ["...dsh-api-remotes", "...dsh-api-session-controller",
+           "...dsh-client-ui-renderer", "...dsh-client-ui-conversation",
+           "...dsh-client-ui-model-selection", "...dsh-client-locale"]
+
+// 本插件（徽标从不出现）
+"inject": ["...dsh-client-ui-renderer"]
+```
+
+**`slots.inject(key, cb)` 在槽尚未被声明时是静默等待的**（渲染器源码
+`dsh-client-ui-renderer/lib/client.js` 第 1384–1398 行）：
+
+```js
+const spec = this._core.specDynamic(key);
+if (spec === void 0) return;          // ← 未声明：直接返回，不执行 callback
+const disposeEffect = ctx.effect(callback, ...);
+```
+
+而 `client.inject` 决定 bundle 的**加载顺序**。本插件没声明
+`dsh-client-ui-conversation`，`apply` 就跑在它声明
+`conversation.input.right` 之前 → `slots.inject` 那一刻槽还不存在 → 回调永不执行
+→ 徽标永不出现，且**日志里一个字都没有**。
+
+DOM 侧同样验证过：`[class*=standardControls]` 里有 2 个子元素，
+第一个是 workbuddy 的 `WB.742（积分）`，第二个是模型座 —— 同一格、同一插槽，
+它能挂上、我不能，只能是加载顺序。
+
+| 约束 | 原因 |
+|---|---|
+| `client.inject` 必须含**声明该槽的包** | `slots.inject` 对未声明槽静默等待，不抛错、不重试、不告警 |
+| 必须含 `dsh-client-ui-conversation` | 它声明 `conversation.input.right` |
+| 必须含 `dsh-client-ui-model-selection` | `modelDirectories` 服务由它提供，`ctx.inject` 靠它 |
+| 之前「未声明槽注册会抛错」的判断是**错的** | 那是 `renderSlot` 里的校验（声明方），不是注册方；注册方只是静默等待 |
+
+### 显示规则：不出现「待路由」
+
+需求：「待路由也不应该写出来；如选了号就显示那个号，统一路由就选表中有额度且排第一的，后续路由再更新」。
+
+`/routing` 新增两个字段（都不含凭据）：
+
+- `preview`：`pool.previewOrder(1)[0]` —— 与 `pick` **同一套**「快过期先用」排序的
+  第一个，即「下一条请求会用谁」；
+- `accounts`：`[{ accountId, nickname }]` —— 钉定栏位靠它把
+  `zcode-start-plan-acct-<id>` 换成昵称。
+
+客户端取值优先级（全部是确定值）：
+
+1. 钉定栏位 → 用所选账号 id 查 `accounts` 得昵称（**选了哪个号就显示哪个号**）；
+2. 有真实派发记录且属于该栏位 → 用记录（带「上次：model」）；
+3. 统一栏位有记录 → 真实路由到的账号；
+4. 统一栏位无记录 → `preview`（表里排第一的账号）；
+5. 空账号池 → 「无可用账号」。
+
+### 实现（照 workbuddy 积分徽标的方案）
+
+- Client 贡献物 `ModelRouteBadge` 挂在 **`conversation.input.right`** ——
+  composer `standardControls` 行里就渲染在模型座**正前方**的那一格；
+- **只在选中本插件模型时显示**：读宿主 model directory
+  （`useSyncExternalStore(directory.store.subscribe, getSnapshot)`），
+  按 `selection.provider` 前缀判归属，非本插件一律 `return null`；
+- Host 侧 `AccountPool.noteRouted()` 在**每次真实派发前**回填
+  `{ accountId, nickname, modelId, at }`（进程内），`GET /api/zcode-start-plan/routing` 暴露；
+- 徽标可点（立即刷新），换号时闪一下；显示「当前账号 / 钉定 + 昵称」。
+
+### 事故记录：第一次实现把面板改白
+
+第一次用的座位是模型座的 `.label` 子座位，在宿主里**从未被声明**：
+`dsh-client-ui-model-selection` 只 `renderSlot()` 调用它，没有任何包的
+`slots.register({ name })` 注册表声明过它。向未声明的槽注册会抛错，
+错误顺着同步 `apply` 冒泡进 DSH loader，**整个 client bundle 的 apply 被打断**，
+配置页随之消失（不只是徽标不出现）。
+
+| 约束 | 原因 |
+|---|---|
+| 座位只能用 composer 注册表里**已声明**的槽 | 未声明 → 注册抛错 → 整个 bundle 的 apply 死掉，配置页一起白 |
+| `modelDirectories` **不能**进硬 `inject` | 硬 inject 缺一个服务就整个 fiber 挂起；用 `ctx.inject([...])` 延迟注入，缺了只是徽标不出现 |
+| 每个贡献都包 `guardContribution` | 任何一次注册失败降级成 `console.error`，不再冒泡打断 loader |
+| 数据源是 `pool.lastRouted()`，不是配置里的钉定账号 | 统一选号每请求都会换号（快过期先用/忙标记/限流切换），配置值会立刻说谎 |
+| 拿不到真值就**隐藏**，不放占位 | 留一个可能过期的名字冒充「当前账号」比不显示更糟（workbuddy #99 同款收敛） |
+| 只在选中本插件模型时轮询 | 别的模型下一次请求不会换号，读了也是噪声 |
+| `/routing` 只回 accountId/昵称/模型 id/时间戳 | 前端永不接触凭据（有测试断言不含 jwt/device_mid） |
+
+回归闸（`tests/client-panel.test.mjs`）：断言注入的每个座位都在 composer
+已声明集合内、禁止那个事故座位、`modelDirectories` 不进硬 inject、注册被 guard 包住。
+
 ## 未发布 — 面板「总额度」把未生效额度也计入分母
 
 需求：「把未启用的额度也加入进总额度」。

@@ -185,3 +185,38 @@ test('isUsableCredential: 缺 zcode_jwt 或 device_mid 一律不可用', () => {
 test('add 拒绝形状不合法的凭据（写入侧也要校验）', withPool(async (pool) => {
   assert.throws(() => pool.add({ zcode_jwt: 'x' }), /凭据形状不合法/)
 }))
+
+/**
+ * 1.0.0 实时路由：模型栏旁的「当前使用账号」读的是**每次真实派发**的记录，
+ * 而不是配置里的钉定账号 —— 统一选号会换号，配置值会立刻说谎。
+ */
+test('noteRouted: 记录每次真实派发，换号跟着走，改名即时生效', withPool(async (pool) => {
+  assert.equal(pool.lastRouted(), undefined, '启动后未发请求 = undefined（不是「没有账号」）')
+  const a = pool.add(credential('a'), '账号A').entry
+  const b = pool.add(credential('b'), '账号B').entry
+
+  const first = pool.noteRouted(a.id, 'GLM-5.3-Flash')
+  assert.equal(first.accountId, a.id)
+  assert.equal(first.nickname, '账号A')
+  assert.equal(first.modelId, 'GLM-5.3-Flash')
+  assert.ok(first.at > 0)
+
+  /** 换号：记录必须跟着走（这正是「实时」的含义）。 */
+  assert.equal(pool.noteRouted(b.id, 'GLM-5.3').accountId, b.id)
+  assert.equal(pool.lastRouted().nickname, '账号B')
+
+  /** 改名后下一次记录带新昵称（不卡旧名）。 */
+  pool.patchAccount(b.id, { nickname: '改名后的B' })
+  assert.equal(pool.noteRouted(b.id, 'GLM-5.3').nickname, '改名后的B')
+}))
+
+test('noteRouted: 空入参不覆盖上一条；记录里绝不含凭据', withPool(async (pool) => {
+  const a = pool.add(credential('a'), 'A').entry
+  pool.noteRouted(a.id, 'GLM-5.3-Flash')
+  const before = pool.lastRouted()
+  pool.noteRouted('', 'GLM-5.3')
+  pool.noteRouted(undefined)
+  assert.equal(pool.lastRouted(), before, '非法入参不覆盖真实记录')
+  assert.equal(JSON.stringify(before).includes('jwt-a'), false, '路由记录不含 zcode_jwt')
+  assert.equal(JSON.stringify(before).includes('dev-a'), false, '路由记录不含 device_mid')
+}))

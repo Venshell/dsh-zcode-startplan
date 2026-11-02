@@ -322,13 +322,15 @@ test('apply：等 llm 出现后注册 adapter + 状态工具，dispose 时收尾
   /**
    * ⚠ 面板 404 的回归闸：管理路由必须经**可选注入**挂到 `webServer` 上。
    * 0.4.4 从 facade 探测 `ctx.webServer` → 拿不到 → 静默跳过 → 面板永远 404。
-   * 这里断言 17 条 `/api/zcode-start-plan/*` 路由真的注册进了路由表。
-   * （0.9.3 加了 /openai-gateway：状态 + 开关；0.9.7 删了无调用方的 /use。）
+   * 这里断言 18 条 `/api/zcode-start-plan/*` 路由真的注册进了路由表。
+   * （0.9.3 加了 /openai-gateway：状态 + 开关；0.9.7 删了无调用方的 /use；
+   *   1.0.0 加了 /routing：模型栏旁「当前使用账号」的实时数据源。）
    */
-  assert.equal(routes.length, 17, `应注册 17 条账号面板路由，实际 ${routes.length}`)
+  assert.equal(routes.length, 18, `应注册 18 条账号面板路由，实际 ${routes.length}`)
   const paths = routes.map((route) => route.path).sort()
   assert.ok(!paths.includes('/api/zcode-start-plan/use'), '/use 已移除（0.7.0 起 expiry 选号，置顶不再决定取号）')
   assert.ok(paths.includes('/api/zcode-start-plan/summary'), '缺少 /summary（面板首次加载就靠它）')
+  assert.ok(paths.includes('/api/zcode-start-plan/routing'), '缺少 /routing（模型栏旁的「当前使用账号」靠它）')
   assert.ok(paths.includes('/api/zcode-start-plan/auto-claim'), '缺少 /auto-claim（自动领取开关）')
   assert.ok(paths.includes('/api/zcode-start-plan/login/start'), '缺少 /login/start')
   assert.ok(paths.includes('/api/zcode-start-plan/login/poll'), '缺少 /login/poll')

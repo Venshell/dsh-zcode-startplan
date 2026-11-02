@@ -878,3 +878,233 @@ test('DistributionKeysSection: 现代 API key 管理形态（卡片 + 用量条 
   assert.match(src, /confirmDeleteId/, '删除两步确认（武装 id state）')
   assert.match(src, /formatTokens\(preset\)/, '限额用预设分段选择')
 })
+
+/**
+ * 1.0.0：模型栏旁「当前使用账号」——**只在选中本插件模型时显示**。
+ *
+ * 本组测试的第一条是 0.9.9 那次事故的回归闸：
+ * 当时注册到 `conversation.input.model.label`（只被 renderSlot 调用、
+ * **从未被任何包声明**），向未声明的槽注册会让整个 client bundle 的 apply 抛错，
+ * 面板一起白掉。
+ */
+const DECLARED_COMPOSER_SLOTS = new Set([
+  'conversation.input.attachments',
+  'conversation.input.overlay',
+  'conversation.input.permission',
+  'conversation.input.left',
+  'conversation.input.plan',
+  'conversation.input.right', // ← workbuddy 积分徽标用的就是它
+  'conversation.input.model',
+  'conversation.input.activity',
+  'conversation.composer.dock',
+])
+
+test('RouteBadge 插槽：只能注册到 composer 里**已声明**的槽', () => {
+  /** 从源码抓出所有 slots.inject('…') 的座位名。 */
+  const injected = [...SOURCE.matchAll(/slots\.inject\(\s*([A-Z_]+|'[^']+')/g)]
+    .map((m) => m[1])
+  assert.ok(injected.length >= 2, '应至少注册两个插槽（配置页 + 模型栏徽标）')
+
+  /** 常量必须解析到实际字符串。 */
+  const literal = (token) => {
+    if (token.startsWith("'")) return token.slice(1, -1)
+    const decl = new RegExp(`const ${token}\\s*=\\s*'([^']+)'`).exec(SOURCE)
+    assert.notEqual(decl, null, `找不到常量 ${token} 的字面量`)
+    return decl[1]
+  }
+
+  for (const token of injected) {
+    const name = literal(token)
+    assert.ok(
+      DECLARED_COMPOSER_SLOTS.has(name) || name === 'plugins.bundle.config',
+      `插槽 ${name} 未在宿主 composer 注册表里声明 —— 向它注册会让整个 bundle 的 apply 抛错`,
+    )
+    assert.notEqual(name, 'conversation.input.model.label', '0.9.9 事故座位：只被 renderSlot 调用，从未声明')
+  }
+
+  /** 徽标必须落在模型座旁边的那一格。 */
+  assert.match(SOURCE, /conversation\.input\.right/, '徽标座位必须是 conversation.input.right')
+})
+
+function buildRouteBadge() {
+  /** uSES 桩：直接读快照（本组测的是「渲不渲染」，不是订阅时序）。 */
+  const fakeReact = {
+    ...FakeReact,
+    useSyncExternalStore: (subscribe, getSnapshot) => {
+      FakeReact.useState(0)
+      return getSnapshot()
+    },
+  }
+  const code = `
+    const h = React.createElement
+    const { useState, useRef, useCallback, useEffect } = React
+    const API = '/api/zcode-start-plan'
+    const ROUTING_POLL_MS = 2000
+    const PROVIDER_PREFIX = 'zcode-start-plan'
+    const useSyncExternalStore = React.useSyncExternalStore
+    ${extractFunction('ModelRouteBadge')}
+    return { ModelRouteBadge }
+  `
+  const mod = new Function('React', code)(fakeReact)
+  return {
+    render: (props) => resolve(mod.ModelRouteBadge(props), fakeReact),
+  }
+}
+
+/** 造一个最简 model directory：`store` 是 uSES 可用的外部 store。 */
+function fakeDirectory(current) {
+  return {
+    store: {
+      getSnapshot: () => ({ current }),
+      subscribe: () => () => {},
+    },
+  }
+}
+
+test('ModelRouteBadge: 未选中本插件模型时**不渲染**（选中它才显示）', () => {
+  const badge = buildRouteBadge()
+  const cases = [
+    [null, '空会话（没有选中模型）'],
+    [{ provider: 'deepseek', model: 'deepseek-v4.1-flash' }, '别的 provider'],
+    [{ provider: 'workbuddy', model: 'WB.1' }, 'workbuddy 的模型'],
+  ]
+  for (const [current, label] of cases) {
+    assert.equal(
+      badge.render({ directory: fakeDirectory(current) }),
+      null,
+      `${label} 下不应出现徽标`,
+    )
+  }
+  /** 目录缺席（旧宿主 / 无会话）也不能炸。 */
+  assert.equal(badge.render({ directory: undefined }), null, '没有 directory 时静默不渲染')
+})
+
+test('ModelRouteBadge: 样式照抄 workbuddy 积分徽标（内联、无描边、11px 注释级）', () => {
+  const src = extractFunction('ModelRouteBadge')
+
+  /**
+   * 与 `@venshell/dsh-workbuddy-connect` 的 wrapperStyle / buttonStyle$1 /
+   * creditStyle 逐条对齐：用户的诉求是「字体和外框和 workbuddy 一样」。
+   */
+  assert.match(src, /transform: 'translateY\(2px\)'/, '外层容器要下移 2px 与相邻控件对齐')
+  assert.match(src, /height: 30/, '按钮高 30（与 composer 控件一致）')
+  assert.match(src, /border: 0/, '**不能有外框**')
+  assert.match(src, /background: 'transparent'/, '透明背景')
+  assert.match(src, /borderRadius: 8/, '圆角 8（虽然无边框，hover 区仍是圆角）')
+  assert.match(src, /fontSize: 11/, '字号 11')
+  assert.match(src, /lineHeight: '16px'/, '行高 16px')
+  assert.match(src, /--dsw-alias-label-tertiary/, '文字用 tertiary 色（注释级）')
+  assert.match(src, /wrapperStyle/, '有外层 wrapper（workbuddy 同结构）')
+  assert.match(src, /creditStyle/, '标签用 creditStyle 同款排版')
+
+  /** 不允许再退回「药丸徽标」：描边 / 绿点 / 大圆角都是被否掉的样子。 */
+  assert.doesNotMatch(src, /border: '1px/, '不应有描边')
+  assert.doesNotMatch(src, /zsp-route-dot/, '不再渲染状态圆点')
+  assert.doesNotMatch(src, /999px/, '不做药丸形')
+})
+
+test('ModelRouteBadge: 选中本插件模型才算 mine，且只显示确定账号', () => {
+  const src = extractFunction('ModelRouteBadge')
+  assert.match(src, /startsWith\(PROVIDER_PREFIX\)/, '按前缀判归属')
+  assert.match(src, /directory\?\.store/, '读宿主的 model directory')
+  assert.match(src, /useSyncExternalStore/, '订阅而不是轮询目录')
+  assert.match(src, /lastRouted/, '数值来自 /routing 的 lastRouted（实时）')
+  /**
+   * 显示规则：**不出现「待路由」这种不确定文案**，一律给出确定账号 ——
+   *   · 钉定栏位 → 用所选账号 id 在池子里查昵称（选哪个显示哪个）
+   *   · 统一栏位有派发记录 → 真实路由到的账号
+   *   · 统一栏位还没派发 → `/routing` 的 preview（快过期先用排序的第一个）
+   */
+  assert.match(src, /preview/, '统一栏位用 preview 兜底（而不是「待路由」）')
+  assert.match(src, /pinnedAccountId/, '钉定栏位按所选账号 id 查昵称')
+  assert.match(src, /routing\?\.accounts/, '昵称来自 /routing 的 accounts 表')
+  assert.doesNotMatch(src, /'待路由'/, '不应再出现「待路由」文案')
+  assert.match(src, /'-acct-'/, '钉定栏位要能从 provider id 切出账号 id')
+
+  /**
+   * 只显示账号名：不加「钉定」「当前账号」这类前缀 ——
+   * 徽标本身就是「当前使用账号」，再写一遍属于冗余（用户明确要求去掉）。
+   */
+  assert.doesNotMatch(src, /'钉定'/, '徽标文案里不能出现「钉定」二字')
+  assert.doesNotMatch(src, /'当前账号'/, '徽标文案里不能出现「当前账号」前缀')
+})
+
+/**
+ * 额度占比圆环：几何参数必须与宿主「上下文使用量」圆环一致，
+ * 否则并排时会看出两套控件。实测宿主那个圆环是：
+ *   viewBox="0 0 14 14"  r=5.5  stroke-width 2  rotate(-90 7 7)  + stroke-dasharray
+ */
+test('ModelRouteBadge: 额度圆环与上下文使用量圆环同几何（14×14 / r5.5 / rotate -90）', () => {
+  const src = extractFunction('ModelRouteBadge')
+  assert.match(src, /RING_R = 5\.5/, '半径必须是 5.5（与上下文圆环一致）')
+  assert.match(src, /2 \* Math\.PI \* RING_R/, '周长由半径算，不写死')
+  assert.match(src, /viewBox: '0 0 14 14'/, 'viewBox 14×14')
+  assert.match(src, /width: 14,[\s\S]{0,40}height: 14/, '渲染尺寸 14×14')
+  assert.match(src, /rotate\(-90 7 7\)/, '起点转到 12 点方向 ⇒ 顺时针占据')
+  assert.match(src, /strokeDasharray/, '用 dasharray 表达占比')
+  assert.match(src, /strokeWidth: 2/, '线宽 2')
+
+  /** 未知占比只画灰底，不编造进度。 */
+  assert.match(src, /ratio === undefined \|\| ratio === null/, '占比未知时只画底圈')
+  /** 快用完转危险色（与面板进度条同一套语义）。 */
+  assert.match(src, /ratio >= 0\.9[\s\S]{0,60}label-danger/, '≥90% 转危险色')
+  /** 圆环必须是装饰，不能抢走按钮的可访问名。 */
+  assert.match(src, /'aria-hidden': 'true'/, '圆环 aria-hidden')
+})
+
+test('ModelRouteBadge: 源码里没有任何「未声明插槽」的残留引用', () => {
+  /**
+   * 0.9.9 事故座位 = `conversation.input.model` + `.label`。
+   * 拼出来再查，避免本文件自己成为匹配对象。
+   */
+  const BANNED = `conversation.input.model${'.'}label`
+  assert.equal(SOURCE.includes(BANNED), false, `这个座位在宿主里根本不存在：${BANNED}`)
+})
+
+/**
+ * 0.9.9 事故的两层正防御（workbuddy 同款），必须在源码里成立：
+ * 少任何一层，一次注册失败就能把整个配置页带走。
+ */
+test('RouteBadge 注册：modelDirectories 走延迟注入 + 每次贡献都有 guard', () => {
+  /** ① 硬 inject 里只有 slots —— 多一个缺席服务就会让整个 fiber 挂起。 */
+  const injectLine = /inject:\s*\[([^\]]*)\]/.exec(SOURCE)
+  assert.notEqual(injectLine, null, '找不到 apply 返回的 inject 声明')
+  assert.equal(injectLine[1].includes('modelDirectories'), false, 'modelDirectories 不能进硬 inject')
+
+  /** ② 用 ctx.inject(['modelDirectories', 'remote', 'remote.session']) 延迟注入。 */
+  assert.match(SOURCE, /ctx\.inject\(\s*\['modelDirectories'/, '必须走 ctx.inject 延迟注入')
+  assert.match(SOURCE, /scope\.modelDirectories\?\.directoryFor\(sessionId\)/, '从 scope 取 directory')
+
+  /**
+   * ⚠ **必须一起声明 `remote` 与 `remote.session`**。
+   *
+   * `modelDirectories.directoryFor()` 内部要用 `sessions`/`remote`/
+   * `remote.session`（它自己的 static inject），而宿主 ctx 是沙箱 façade，
+   * 只挂本 fiber **声明过**的服务。少声明就会在调用时抛：
+   *   `cannot get property "remote.session" without inject`
+   * 这个错误发生在 inject props 回调里 → 徽标永不出现（实测踩过）。
+   */
+  const EXPECTED = "ctx.inject(['modelDirectories', 'remote', 'remote.session'],"
+  assert.equal(
+    SOURCE.includes(EXPECTED),
+    true,
+    `ctx.inject 必须同时声明 modelDirectories / remote / remote.session；找不到：${EXPECTED}`,
+  )
+
+  /** ③ 贡献被 guard 包住，防止抛错打断整个 bundle 的 apply。 */
+  assert.match(SOURCE, /function guardContribution/, '必须有 guardContribution')
+  assert.match(SOURCE, /NOOP_DISPOSER/, '降级时返回空 disposer（slot 运行时需要）')
+  const guarded = /guardContribution\(\s*'model route badge'/.test(SOURCE)
+  assert.equal(guarded, true, '注册必须包在 guardContribution 里')
+
+  /**
+   * ④ `inject` 回调自己也要吞异常：它**每次渲染都被调用**
+   * （`directoryFor` 在会话作用域未就绪/子代理会话上会抛），
+   * 抛一次就整块渲染崩掉 → 徽标永远不出现。
+   */
+  assert.match(SOURCE, /model directory lookup failed/, 'inject 回调内必须 try/catch')
+  const injectCallback = /inject:\s*\(sessionId\)\s*=>\s*\{([\s\S]{0,600}?)\n\s*\},/.exec(SOURCE)
+  assert.notEqual(injectCallback, null, '找不到 slot 注册的 inject 回调')
+  assert.match(injectCallback[1], /try\s*\{/, 'inject 回调体必须是 try 包裹的')
+  assert.match(injectCallback[1], /return \{\}/, '失败时返回空 props 而不是抛出')
+})

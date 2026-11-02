@@ -29,12 +29,62 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
     const { useCallback, useEffect, useRef, useState } = React
+    /** React 18 才有；宿主版本都满足，但缺失时降级成普通 useState 快照。 */
+    const useSyncExternalStore = React.useSyncExternalStore
+      ?? ((subscribe, getSnapshot) => {
+        const [value, setValue] = useState(getSnapshot)
+        useEffect(() => subscribe(() => setValue(getSnapshot())), [subscribe, getSnapshot])
+        return value
+      })
 
     const SLOT = 'plugins.bundle.config'
     /** 宿主按包名派发此座位（workbuddy 实证：key 必须与安装的包名一字不差）。 */
     const BUNDLE_KEY = 'dsh-zcode-startplan'
+    /**
+     * 模型栏旁「当前使用账号」的座位（1.0.0）。
+     *
+     * ⚠ **必须是 `conversation.input.right`**：它是 composer 注册表里**已声明**的
+     * `{ kind: 'list', scope: 'session' }` 槽，且在 `standardControls` 这一行里
+     * 就渲染在模型座**正前方** ——
+     *   `renderSlot("conversation.input.right", {}), renderSlot("conversation.input.model", …)`
+     * 视觉上就是「模型列表旁边」。workbuddy 的积分徽标用的也是这个座位。
+     *
+     * 反例（0.9.9 曾误用，导致整个面板白掉）：模型座的 `.label` 子座位只被
+     * model-selection 包 `renderSlot()` 调用，**没有任何包声明它** ——
+     * 向未声明的槽注册会让整个 client bundle 的 `apply` 抛错，连带把配置页带走。
+     */
+    const ROUTE_SLOT = 'conversation.input.right'
+    /**
+     * 本插件拥有的 provider id 前缀。账号栏位是 `<provider>-acct-<账号id>`，
+     * 统一栏位就是 `<provider>` —— 都以它为前缀，故用 startsWith 判定。
+     */
+    const PROVIDER_PREFIX = 'zcode-start-plan'
+    /** 轮询间隔：路由是进程内状态，没有推送通道（对齐 workbuddy 的 60s 节奏，路由变化快所以更密）。 */
+    const ROUTING_POLL_MS = 2000
     const API = '/api/zcode-start-plan'
     const CONFIRM_RESET_MS = 3000
+
+    /** 降级时返回的空 disposer（slot 运行时总是期望拿到一个）。 */
+    const NOOP_DISPOSER = () => {}
+
+    /**
+     * 跑一个 browser-side 贡献，失败降级成一条 console.error（workbuddy 同款）。
+     *
+     * ⚠ 这是 0.9.9 事故的正面防御：任何一次 `slots.register` 抛错都会顺着
+     * `apply` 冒泡进 DSH loader，把**整个** client bundle 的 apply 打断 ——
+     * 配置页随之白掉。逐个贡献包一层，坏一个不影响其余的。
+     */
+    function guardContribution(label, run) {
+      try {
+        return run()
+      } catch (error) {
+        console.error(
+          `[dsh-zcode-startplan] client contribution failed (${label}):`,
+          error,
+        )
+        return undefined
+      }
+    }
 
     const CSS = `
       .zsp-panel{display:flex;flex-direction:column;gap:10px;width:100%;min-width:0;color:var(--dsw-alias-label-primary);font-size:12.5px;line-height:18px}
@@ -137,6 +187,13 @@ window.__ModuleLoader__.load({
       .zsp-toggle input:focus-visible + .zsp-toggle-track{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
       .zsp-toggle input:disabled{cursor:default}
       .zsp-toggle input:disabled + .zsp-toggle-track{opacity:.5}
+      /**
+       * 模型栏旁的「当前使用账号」：样式**内联写在组件里**（照 workbuddy），
+       * 这里只留一条 hover 反馈 —— 面板 CSS 与 composer 是两套上下文，
+       * 内联样式不会因为 <style> 注入时机而闪一下默认外观。
+       */
+      .zsp-route:hover{color:var(--dsw-alias-label-primary)}
+      .zsp-route:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
       @media (max-width: 520px){
         .zsp-head{gap:6px}
         .zsp-title{font-size:12.5px}
@@ -1481,6 +1538,331 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 模型栏旁的「当前使用账号」（1.0.0，座位 `conversation.input.right`）。
+     *
+     * ## 何时显示
+     *
+     * **只当选中模型的 provider 属于本插件时**才渲染（workbuddy 徽标同款判定：
+     * 按 `selection.provider` 归属，别的 provider 直接 `return null`）。
+     * provider id 用前缀判 —— 统一栏位是 `zcode-start-plan`，
+     * 账号栏位是 `zcode-start-plan-acct-<账号id>`。
+     *
+     * ## 为什么读路由状态而不是配置
+     *
+     * 统一选号**每次请求都可能换号**（快过期先用 / 忙标记 / 限流切换），
+     * 所以「当前用的是谁」是进程内事实：plan-client 在真正派发前写进
+     * `pool.noteRouted()`，这里读 `/routing` 的 `lastRouted`。
+     *
+     * ⚠ 本组件**不碰**模型座下的任何子座位（那些只被 renderSlot 调用、未声明）。
+     */
+    function ModelRouteBadge(props) {
+      const { directory } = props || {}
+
+      /**
+       * 订阅宿主 model directory（workbuddy 实证写法）：
+       * `directory.store` 是 `{ subscribe, getSnapshot }` 形态的外部 store。
+       * 目录缺席（旧宿主 / 没有会话）时退化为不订阅、不显示。
+       */
+      const store = directory?.store
+      const subscribe = useCallback(
+        (listener) => (typeof store?.subscribe === 'function' ? store.subscribe(listener) : () => {}),
+        [store],
+      )
+      const snapshot = useCallback(
+        () => (typeof store?.getSnapshot === 'function' ? store.getSnapshot() : undefined),
+        [store],
+      )
+      const selection = useSyncExternalStore(subscribe, snapshot, snapshot)?.current
+      /** 只在「存在选中项」时轮询，避免空会话的空转。 */
+      const hasSelection = selection !== null && selection !== undefined
+
+      /** 只对本插件的模型出现；其它 provider 一律不渲染。 */
+      const providerId = typeof selection?.provider === 'string' ? selection.provider : ''
+      const mine = providerId.startsWith(PROVIDER_PREFIX)
+      /** 账号栏位（`<provider>-acct-<账号id>`）= 钉定；统一栏位 = 自动选号。 */
+      const pinned = providerId.includes('-acct-')
+      const pinnedAccountId = pinned ? providerId.slice(providerId.indexOf('-acct-') + '-acct-'.length) : ''
+
+      const [routing, setRouting] = useState(undefined)
+      const [refreshing, setRefreshing] = useState(false)
+      const mounted = useRef(true)
+      const readSeq = useRef(0)
+
+      /** 卸载闸：`refresh` 的迟到响应不得再写 state。 */
+      useEffect(() => {
+        mounted.current = true
+        return () => {
+          mounted.current = false
+        }
+      }, [])
+
+      const refresh = useCallback(async (signal) => {
+        const seq = ++readSeq.current
+        const response = await fetch(`${API}/routing`, {
+          credentials: 'same-origin',
+          cache: 'no-store',
+          headers: { accept: 'application/json' },
+          ...(signal !== undefined ? { signal } : {}),
+        })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const value = await response.json().catch(() => undefined)
+        if (value?.ok !== true) throw new Error('routing response invalid')
+        /** 旧响应不覆盖新响应（换号很快时会有并发读）。 */
+        if (mounted.current && signal?.aborted !== true && seq === readSeq.current) setRouting(value)
+        return value
+      }, [])
+
+      /** 只在「选中本插件模型」时轮询：别的模型下一次请求不会换号，没必要读。 */
+      useEffect(() => {
+        if (!mine || !hasSelection) {
+          setRouting(undefined)
+          return undefined
+        }
+        const controller = new AbortController()
+        refresh(controller.signal).catch(() => {})
+        const timer = setInterval(() => {
+          refresh(controller.signal).catch(() => {})
+        }, ROUTING_POLL_MS)
+        return () => {
+          clearInterval(timer)
+          controller.abort()
+        }
+      }, [mine, hasSelection, refresh])
+
+      /** 换号闪一下：`at` 变化 = 发生过一次真实路由变更。 */
+      const [flash, setFlash] = useState(false)
+      const lastSeenAt = useRef(undefined)
+      useEffect(() => {
+        const at = routing?.lastRouted?.at
+        if (at === undefined) return undefined
+        if (lastSeenAt.current !== undefined && lastSeenAt.current !== at) {
+          setFlash(true)
+          const handle = setTimeout(() => setFlash(false), 700)
+          lastSeenAt.current = at
+          return () => clearTimeout(handle)
+        }
+        lastSeenAt.current = at
+        return undefined
+      }, [routing?.lastRouted?.at])
+
+      if (!mine) return null
+
+      const routed = routing?.lastRouted ?? undefined
+
+      /**
+       * 显示的账号，按优先级取**确定值**，不出现「待路由」这种不确定文案：
+       *
+       * 1. **钉定栏位** → 直接用所选账号 id 在池子里查出昵称
+       *    （选了哪个号就显示哪个号，绝不显示别的）；
+       * 2. 有真实派发记录且记录的就是这个钉定账号 → 也用记录（带 modelId 提示）；
+       * 3. **统一栏位有派发记录** → 显示真实路由到的账号；
+       * 4. 统一栏位还没派发过 → 用 `/routing` 的 `preview`
+       *    （与 pick 同一套「快过期先用」排序的第一个 = 下一条会用谁）；
+       * 5. 以上都没有（空账号池）→ 才退回状态文案。
+       */
+      const accountsById = Array.isArray(routing?.accounts) ? routing.accounts : []
+      const pinnedEntry = pinned
+        ? accountsById.find((entry) => entry.accountId === pinnedAccountId)
+        : undefined
+
+      /** 统一栏位：真实记录优先，其次 preview。`usedRatio` 一律从 accounts 表取。 */
+      const ratioOf = (accountId) => {
+        const hit = accountsById.find((entry) => entry.accountId === accountId)
+        return typeof hit?.usedRatio === 'number' ? hit.usedRatio : null
+      }
+      const routedAccount =
+        routed !== undefined && (!pinned || routed.accountId === pinnedAccountId)
+          ? {
+              nickname: routed.nickname,
+              modelId: routed.modelId,
+              usedRatio: ratioOf(routed.accountId),
+              source: 'routed',
+            }
+          : undefined
+      const previewAccount =
+        !pinned && routedAccount === undefined && routing?.preview !== null && routing?.preview !== undefined
+          ? {
+              nickname: routing.preview.nickname,
+              modelId: '',
+              usedRatio:
+                typeof routing.preview.usedRatio === 'number' ? routing.preview.usedRatio : null,
+              source: 'preview',
+            }
+          : undefined
+      const pinnedAccount = pinnedEntry !== undefined
+        ? {
+            nickname: pinnedEntry.nickname,
+            modelId: routedAccount?.modelId ?? '',
+            usedRatio: ratioOf(pinnedAccountId),
+            source: 'pinned',
+          }
+        : undefined
+
+      const shown = routedAccount ?? pinnedAccount ?? previewAccount
+
+      /**
+       * 只显示账号名，不加「钉定 / 当前账号」前缀 —— 徽标本身就是「当前使用账号」，
+       * 再写一遍是冗余；钉定栏位与统一栏位的差别放在 tooltip 里说明。
+       */
+      const state = shown === undefined ? (refreshing ? 'loading' : 'idle') : 'live'
+      const label = shown !== undefined ? shown.nickname : refreshing ? '读取中…' : '无可用账号'
+      const tooltip = shown === undefined
+        ? '账号池为空：先在插件面板登录添加账号'
+        : [
+            shown.source === 'pinned'
+              ? '该栏位固定使用此账号'
+              : shown.source === 'preview'
+                ? '下一条请求将使用此账号（快过期先用）'
+                : pinned
+                  ? '该栏位固定使用此账号'
+                  : '统一选号：下次请求可能换号',
+            shown.modelId.length > 0 ? `上次：${shown.modelId}` : '',
+            '点击立即刷新',
+          ].filter(Boolean).join(' · ')
+
+      const checkNow = () => {
+        if (refreshing) return
+        setRefreshing(true)
+        refresh()
+          .catch(() => {})
+          .finally(() => {
+            if (mounted.current) setRefreshing(false)
+          })
+      }
+
+      /**
+       * 样式照抄 workbuddy 积分徽标（`@venshell/dsh-workbuddy-connect` 的
+       * `wrapperStyle` / `buttonStyle$1` / `creditStyle`）：
+       *
+       * - 外层 `inline-flex` 容器负责与相邻控件的对齐（`translateY(2px)`）；
+       * - 徽标本身是**透明、无边框、无圆角**的按钮，hover 只改文字色；
+       * - 字号 11 / 行高 16 / `--dsw-alias-label-tertiary`，读起来像「模型名的注释」，
+       *   而不是一个与模型选择器抢视觉重心的独立控件。
+       *
+       * 用内联样式而非 CSS 类：插槽贡献物在任何时刻都要和宿主 chrome 对齐，
+       * 不依赖 <style> 的注入时机。
+       */
+      const wrapperStyle = {
+        display: 'inline-flex',
+        position: 'relative',
+        alignItems: 'center',
+        transform: 'translateY(2px)',
+        marginRight: -8,
+      }
+      const buttonStyle = {
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 2,
+        height: 30,
+        padding: '0 6px',
+        border: 0,
+        borderRadius: 8,
+        background: 'transparent',
+        color: 'var(--dsw-alias-label-secondary)',
+        font: 'inherit',
+        whiteSpace: 'nowrap',
+        cursor: 'pointer',
+      }
+      const creditStyle = {
+        fontSize: 11,
+        lineHeight: '16px',
+        color: 'var(--dsw-alias-label-tertiary)',
+        whiteSpace: 'nowrap',
+        padding: '0 4px 0 0',
+      }
+      /** 换号一闪：同款注释级配色，只改文字色，不加背景/描边。 */
+      const flashStyle = flash
+        ? { color: 'var(--dsw-alias-state-business-primary)' }
+        : undefined
+
+      /**
+       * 额度占比圆环：**照抄宿主的上下文使用量圆环**（composer 里
+       * `aria-label="上下文已用 36%"` 那个）：
+       *
+       *   <svg viewBox="0 0 14 14" width="14" height="14">
+       *     <circle class="track" cx="7" cy="7" r="5.5"/>
+       *     <circle class="fill" cx="7" cy="7" r="5.5"
+       *             stroke-dasharray="<周长×占比> <周长>" transform="rotate(-90 7 7)"/>
+       *   </svg>
+       *
+       * `rotate(-90 7 7)` 把起点转到 12 点方向，`dasharray` 决定顺时针占比 ——
+       * 与上下文圆环完全同一套几何参数，所以看起来就是同一个控件家族。
+       * r=5.5 ⇒ 周长 = 2πr ≈ 34.5575。
+       */
+      const RING_R = 5.5
+      const RING_CIRC = 2 * Math.PI * RING_R
+      const ratio = typeof shown?.usedRatio === 'number' ? shown.usedRatio : undefined
+      const ring = ratio === undefined || ratio === null
+        ? /** 占比未知（企业版 / 还没拉到）：只画灰圈底，不编造进度。 */
+          [h('circle', {
+            key: 'track',
+            cx: 7,
+            cy: 7,
+            r: RING_R,
+            fill: 'none',
+            stroke: 'var(--dsw-alias-border-l2)',
+            strokeWidth: 2,
+          })]
+        : [
+            h('circle', {
+              key: 'track',
+              cx: 7,
+              cy: 7,
+              r: RING_R,
+              fill: 'none',
+              stroke: 'var(--dsw-alias-border-l2)',
+              strokeWidth: 2,
+            }),
+            h('circle', {
+              key: 'fill',
+              cx: 7,
+              cy: 7,
+              r: RING_R,
+              fill: 'none',
+              stroke: ratio >= 0.9 ? 'var(--dsw-alias-label-danger)' : 'var(--dsw-alias-state-business-primary)',
+              strokeWidth: 2,
+              strokeLinecap: 'round',
+              strokeDasharray: `${(RING_CIRC * Math.min(1, Math.max(0, ratio))).toFixed(3)} ${RING_CIRC.toFixed(3)}`,
+              transform: 'rotate(-90 7 7)',
+            }),
+          ]
+
+      const quotaRing = h(
+        'svg',
+        {
+          viewBox: '0 0 14 14',
+          width: 14,
+          height: 14,
+          'aria-hidden': 'true',
+          style: { flex: 'none', display: 'block' },
+        },
+        ring,
+      )
+
+      return h(
+        'span',
+        { style: wrapperStyle },
+        h(
+          'button',
+          {
+            type: 'button',
+            style: { ...buttonStyle, ...flashStyle },
+            className: 'zsp-route',
+            'data-state': state,
+            title: tooltip,
+            'aria-label': shown !== undefined ? `${shown.nickname}。${tooltip}` : tooltip,
+            'aria-busy': refreshing,
+            onClick: checkNow,
+          },
+          /** 圆环在左、账号名在右：与上下文使用量圆环同一几何与配色。 */
+          quotaRing,
+          h('span', { style: creditStyle }, label),
+        ),
+      )
+    }
+
+    /**
      * 面板主体。
      *
      * 宿主以两种 view 调用（workbuddy 实证）：
@@ -1677,12 +2059,78 @@ window.__ModuleLoader__.load({
     }
 
     return {
+      /**
+       * ⚠ 只有**必须**的服务才进硬 inject：硬 inject 里缺一个，整个 fiber 挂起、
+       * 面板一起消失。`modelDirectories` 刻意不进这里 —— 它由下面的
+       * `ctx.inject([...])` 延迟注入（workbuddy 同款），缺了只是徽标不出现。
+       */
       inject: ['slots'],
       apply(ctx) {
         ctx.slots.inject(SLOT, () =>
           /** key = 包名：宿主只在 dsh-zcode-startplan 的详情页派发本条目。 */
           ctx.slots.register({ name: SLOT, key: BUNDLE_KEY }, Panel),
         )
+        /**
+         * 模型栏旁的「当前使用账号」（1.0.0）。
+         *
+         * 照 workbuddy 的写法，**两层防护**：
+         * 1. `ctx.inject(['modelDirectories'])` —— 服务缺席时整块跳过，
+         *    不影响配置页（放硬 inject 里缺了就整个插件挂起）；
+         * 2. 每次贡献都包在 `guardContribution` 里 —— 任何一次注册抛错都降级成
+         *    一条 console.error，绝不冒泡进 loader 把整个 bundle 的 apply 打断。
+         *
+         * ⚠ 座位必须是 `conversation.input.right`（composer 注册表里**已声明**的
+         * list 槽，紧挨 `conversation.input.model`）。绝不可换成模型座的 `.label`
+         * 子座位：它只被 renderSlot() 调用、没有任何包声明，向它注册会抛错。
+         */
+        /**
+         * ⚠ `remote` / `remote.session` 必须一起声明，否则**运行时必炸**：
+         *
+         * `modelDirectories.directoryFor()` 内部要用 `sessions`/`remote`/
+         * `remote.session`（它自己的 `static inject`）。宿主 ctx 是沙箱 façade，
+         * 只挂**本 fiber 声明过**的服务，所以调用 `directoryFor` 时会在
+         * Proxy 上抛 `cannot get property "remote.session" without inject`
+         * —— 而且这个错误发生在 `inject` props 回调里，表现为徽标永不出现。
+         *
+         * 这里不是多余的：声明的是「我不亲自用 remote，但被我调用的服务要用」。
+         */
+        ctx.inject(['modelDirectories', 'remote', 'remote.session'], (scope) => {
+          guardContribution('model route badge', () =>
+            scope.slots.inject(ROUTE_SLOT, () =>
+              guardContribution(
+                'model route badge',
+                () =>
+                  scope.slots.register(
+                    {
+                      name: ROUTE_SLOT,
+                      /** 与 workbuddy 的 10 同序：落在模型座左侧，两者并排。 */
+                      id: 'zcode-start-plan-route',
+                      order: 10,
+                      /**
+                       * ⚠ 这个回调**每渲染一次就调一次**（宿主拿 props 用），
+                       * 必须自己吞掉所有异常：`directoryFor` 在会话作用域尚未
+                       * 建好 / 子代理会话 / 被销毁的会话上都会抛，抛一次就整块
+                       * 渲染崩掉 —— 徽标永远不出现。返回 `{}` 让组件自己隐藏。
+                       */
+                      inject: (sessionId) => {
+                        try {
+                          const directory = scope.modelDirectories?.directoryFor(sessionId)
+                          return directory === undefined ? {} : { directory }
+                        } catch (error) {
+                          console.error(
+                            '[dsh-zcode-startplan] model directory lookup failed:',
+                            error,
+                          )
+                          return {}
+                        }
+                      },
+                    },
+                    ModelRouteBadge,
+                  ) ?? NOOP_DISPOSER,
+              ),
+            ),
+          )
+        })
       },
     }
   },
