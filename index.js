@@ -83,6 +83,24 @@ const DEFAULT_CONFIG = Object.freeze({
    * 两种策略下钉定栏位都固定吃指定账号，不受影响。
    */
   selectionOrder: 'expiry',
+  /**
+   * 上游**首内容超时**（毫秒，issue #4）。
+   *
+   * 请求发出后这么久还没见到第一个内容事件 → 判定「上游不再出流」（额度用尽后
+   * 本渠道的典型形态：HTTP 200 + 一个永不产出内容的 SSE 流），中止并按 `TIMEOUT`
+   * 分类，让宿主/回退链路立刻改道。
+   *
+   * ⚠ 必须显著小于宿主的单次超时（实测 ~300s），否则宿主的超时先落地，
+   * 分类变成笼统的 `PROVIDER_ERROR`，「额度用尽」这个真因被完全掩盖。
+   * 默认 90s；设 0 或负数则回落默认值。
+   */
+  headTimeoutMs: 90_000,
+  /**
+   * 流内读超时（毫秒）：**已经有内容之后**，两个事件之间允许的最大静默。
+   *
+   * 长思考 / 长工具参数需要宽裕，所以它比 `headTimeoutMs` 大得多（默认 180s）。
+   */
+  readTimeoutMs: 180_000,
   /** 上游模型目录缓存时长（毫秒）。 */
   modelCacheMs: 10 * 60_000,
   /** 数据目录（空 = ~/.dsh/zcode-start-plan）。 */
@@ -257,6 +275,16 @@ export function validateConfig(value) {
   if (!Number.isInteger(out.modelCacheMs) || out.modelCacheMs < 0) {
     throw new Error('config.modelCacheMs 必须是非负整数')
   }
+  /**
+   * 超时配置（issue #4）。语义：正整数 = 生效；`0` / 负数 / 缺省 = 回落默认值
+   * （见 plan-client 的 `positiveOr`）。只拒绝「明显写错」的形态（字符串 / 小数）。
+   */
+  if (!Number.isInteger(out.headTimeoutMs)) {
+    throw new Error('config.headTimeoutMs 必须是整数（毫秒；≤0 表示使用默认 90000）')
+  }
+  if (!Number.isInteger(out.readTimeoutMs)) {
+    throw new Error('config.readTimeoutMs 必须是整数（毫秒；≤0 表示使用默认 180000）')
+  }
   if (!isChannelValue(out.channel)) {
     throw new Error('config.channel 只能是 "cn"（国内智谱）或 "intl"（国际 Z.AI）')
   }
@@ -307,6 +335,8 @@ export const Config = makeConfigSchema(validateConfig, {
   models: [...DEFAULT_CONFIG.models],
   accountProviders: DEFAULT_CONFIG.accountProviders,
   selectionOrder: DEFAULT_CONFIG.selectionOrder,
+  headTimeoutMs: DEFAULT_CONFIG.headTimeoutMs,
+  readTimeoutMs: DEFAULT_CONFIG.readTimeoutMs,
   modelCacheMs: DEFAULT_CONFIG.modelCacheMs,
   dataDir: DEFAULT_CONFIG.dataDir,
   channel: DEFAULT_CONFIG.channel,

@@ -117,7 +117,14 @@ test('adapter.stream：上游失败时以 terminal finish 错误 chunk 收尾（
   /** 宿主读 chunk.reason（BlockAssembler）；kind 在顶层会被吞成正常结束。 */
   assert.equal(finish.reason.kind, 'error')
   assert.equal(finish.reason.failure.code, 'RATE_LIMIT')
-  assert.match(finish.reason.failure.message, /3012/)
+  /**
+   * issue #2：**终止块必须已脱敏** —— code 保真，message 只说人话。
+   * 上游原文（含 3012 业务码、unusual activity）只该出现在插件日志里；
+   * 否则用户会看到「另一个通道的判定文案」，排查方向直接被带偏。
+   */
+  assert.doesNotMatch(finish.reason.failure.message, /3012/)
+  assert.doesNotMatch(finish.reason.failure.message, /unusual\s+activity/i)
+  assert.match(finish.reason.failure.message, /限流|风控/)
 })
 
 test('adapter.listModels / resolveModel：模型元数据带上下文窗口与输入模态', async (t) => {

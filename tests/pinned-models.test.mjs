@@ -91,11 +91,13 @@ test('adapter：账号路由派生互逆', async (t) => {
   /** 统一路由不是账号路由。 */
   assert.equal(NativeZcodeStartPlanAdapter.accountIdFromRoute('zcode-start-plan', 'zcode-start-plan'), null)
   assert.equal(NativeZcodeStartPlanAdapter.accountIdFromRoute('zcode-start-plan', 'zcode-start-plan-acct-'), null)
-  /** accountRoutes：只列启用账号。 */
+  /** accountRoutes：只列启用账号，且是**同步**返回值（0.10.0 审计 S7）。 */
   const first = pool.add(cred('a'), '主号')
   const second = pool.add(cred('b'), '国际号')
   pool.setEnabled(second.entry.id, false)
-  const routes = await adapter.accountRoutes()
+  const routes = adapter.accountRoutes()
+  assert.equal(typeof routes.then, 'undefined', 'accountRoutes 必须是同步数组（不是 Promise）')
+  assert.ok(Array.isArray(routes))
   assert.equal(routes.length, 1)
   assert.equal(routes[0].accountId, first.entry.id)
   assert.equal(routes[0].provider, NativeZcodeStartPlanAdapter.accountRoute('zcode-start-plan', first.entry.id))
@@ -362,10 +364,15 @@ test('plan-client：钉定账号额度耗尽 → 报 QUOTA 不换号，且标记
   assert.equal(finish.type, 'finish')
   assert.equal(finish.reason.kind, 'error')
   assert.equal(finish.reason.failure.code, 'QUOTA', '钉定账号额度尽 = 明确报错，不静默换号')
-  assert.match(finish.reason.failure.message, /主号/)
+  assert.equal(
+    finish.reason.failure.message,
+    '模型通道额度已用尽，请等待额度重置或切换模型 / 通道。',
+    'issue #2：终止块必须已脱敏 —— 不出现账号昵称、业务码与上游原文',
+  )
   assert.equal(calls, 1, '只打这一发：换号会吃「国际号」的额度')
   const entry = pool.get(first.entry.id)
   assert.ok(entry.model_rate_limits['GLM-5.3-Flash'] > 0)
+  assert.match(entry.last_error ?? '', /1005/, '完整原因只进账号库（日志/面板），不进聊天记录')
 })
 
 test('plan-client：钉定账号已删除 → 明确报错不回退', async (t) => {
@@ -398,7 +405,8 @@ test('plan-client：钉定账号已删除 → 明确报错不回退', async (t) 
   const finish = chunks[chunks.length - 1]
   assert.equal(finish.reason.kind, 'error')
   assert.equal(finish.reason.failure.code, 'QUOTA')
-  assert.match(finish.reason.failure.message, /已不存在/)
+  /** 脱敏后文案中性（「已不存在」这类细节只进日志），但 code 保真、请求一次未发。 */
+  assert.equal(finish.reason.failure.message, '模型通道额度已用尽，请等待额度重置或切换模型 / 通道。')
   assert.equal(calls, 0, '账号不存在时根本不该发请求')
 })
 

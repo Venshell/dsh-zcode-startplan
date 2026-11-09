@@ -3,6 +3,70 @@
 本文件记录**每次修复背后的宿主契约**。只看 diff 看不出「为什么不能改回去」，
 所以把约束与症状一起写下来。
 
+## 1.0.1 — 额度用尽后的「上游黑洞」与终止失败块脱敏（issue #4 / #2）
+
+### #4：1005 之后仍然发请求，黑洞挂满 300s × 2，最后只报「超时或不可用」
+
+实测时间线（单账号池、GLM-5.3-Flash 免费额度跑尽）：
+
+```
+23:38:51  请求发出
+23:43:53  attempt 1 失败：PROVIDER_ERROR「模型通道超时或不可用」（302s）
+23:48:56  attempt 2（宿主 llm-retry 重试）同样失败            （303s）
+23:48:56  turn 以 error 结束
+```
+
+同一时刻 `zcode_start_plan_status` 里 `lastError` 已是
+`额度用尽（1005 exceed quota limit）`。三条独立缺陷叠加：
+
+| # | 缺陷 | 修复 |
+|---|---|---|
+| 1 | 选号只看 `model_rate_limits[模型]`，`last_error` 已是 1005 也照发 | `pool.hasQuotaError()` / `pool.quotaBlock()`；`candidates()` 把这类账号滤入 `sink.exhausted`，plan-client 据此秒级报 QUOTA |
+| 2 | 上游「200 但永不出流」时，读超时写死 180s、且超时被当网络错 | `sse.js` 拆出**首内容超时** `headTimeoutMs`（默认 90s，显著小于宿主 ~300s）与**流内静默** `readTimeoutMs`（180s）；超时收成 `timeoutError` 而不是抛给宿主 |
+| 3 | 黑洞落 `PROVIDER_ERROR`，回退名单不认、文案笼统 | 新增 `TIMEOUT` 分类：黑洞 / `AbortError` / `TimeoutError` 一律 TIMEOUT，并在 `isFallbackWorthyCode()` 里进回退名单 |
+
+约束（改动前必须知道）：
+
+- **首内容超时必须小于宿主超时**，否则宿主的 `PROVIDER_ERROR` 先落地，真因被盖掉；
+- **黑洞不写当日硬标记**：黑洞的成因未定（额度用尽 / 抖动都长这样），
+  写 `model_rate_limits` 等于「抖一次锁一整天」；没有 1005 证据就不该下结论；
+- 同一账号最多等 `2 × headTimeoutMs`（默认 180s）就换号/报错；
+- 钉定模式仍**绝不换号**，如实报 TIMEOUT。
+
+顺带修掉一颗隐雷：`lastSwitchReason` 的初值是 `'quota'`，导致「一次都没换过轮
+就选不到号」（池子空 / 被额度前置检查挡掉）被误标为 quota，文案与错误码一起错。
+初值改为 `'none'`，最终码按 `concurrency → RATE_LIMIT / timeout → TIMEOUT / 其余 → QUOTA`。
+
+**计时器不能用 `unref()`**（本仓库第二次踩）：`unref` 之后，在「读操作把事件循环
+占满」的场景里定时器永远不会触发 —— 超时保护形同虚设。`sse.js` 的两处都改成
+显式 `clearTimeout`。
+
+### #2：回退 / 兜底路径把「另一个通道」的上游原文直送聊天记录
+
+issue 里贴的补丁依赖 `lib/fallback.js`（`sanitizeFailure` / `shouldFallback` /
+`scrubFailureChunk`），而本仓库此前根本没有这个模块 —— 于是补丁无处落地。
+
+现在补上，并把它变成**所有失败收尾路径的唯一出口**：
+
+```js
+sanitizeFailure(failure)      // → { code, message }：code 保真，message 只说人话
+scrubFailureChunk(chunk)      // finish/error 失败块脱敏；其它块原样（同一引用）
+terminalFailureChunk(failure) // 直接产出合规终止块
+shouldFallback(failure)       // QUOTA / TIMEOUT / RATE_LIMIT 才改道
+```
+
+`adapter.stream()` 的三处出口（本通道失败、翻译器失败、正常收尾）全部过
+`scrubFailureChunk`。约束：**code 绝不能被脱敏改掉**（宿主的重试 / 回退 / 上报
+只认 code），完整原因只进 `#log` 与账号库的 `last_error`。
+
+因此三条旧断言（分别匹配 `/3012/`、`/主号/`、`/已不存在/`）已按新契约更新为
+「code 保真 + 文案中性 + 细节进日志」，而不是放宽断言。
+
+### 测试
+
+`tests/quota-blackhole.test.mjs`（11 例）与 `tests/fallback-scrub.test.mjs`（7 例）。
+`node scripts/run-tests.mjs`：**262/262 通过**。
+
 ## 1.0.0 — 模型列表旁显示「当前使用账号」（实时）
 
 需求：「在模型列表旁边增加当前使用账号，实时的，因为统一选号会自动路由」。
