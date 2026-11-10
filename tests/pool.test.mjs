@@ -220,3 +220,100 @@ test('noteRouted: 空入参不覆盖上一条；记录里绝不含凭据', withP
   assert.equal(JSON.stringify(before).includes('jwt-a'), false, '路由记录不含 zcode_jwt')
   assert.equal(JSON.stringify(before).includes('dev-a'), false, '路由记录不含 device_mid')
 }))
+
+/**
+ * 1.0.1 审计回归：`preview` 是「模型栏旁徽标在首次请求前」的唯一数据源，
+ * 只要它和 `pick` 的筛选不一致，徽标就必然显示一个**真实派发时会跳过**的账号。
+ */
+test('previewOrder 与 pick 同筛选：限流 / 忙 / 凭据不可用的账号不会被预览', withPool(async (pool) => {
+  const a = pool.add(credential('a'), 'A').entry
+  const b = pool.add(credential('b'), 'B').entry
+  const c = pool.add(credential('c'), 'C').entry
+
+  /** 无任何标记时，预览第一 = pick 第一。 */
+  assert.equal(pool.previewOrder('GLM-5.3-Flash', 1)[0].accountId, pool.pick('GLM-5.3-Flash').entry.id)
+
+  /** A 在该模型上限流 → 预览必须跳过 A（而不是按 added_at 取第一个）。 */
+  pool.markModelRateLimited(a.id, 'GLM-5.3-Flash', Date.now() + 3_600_000)
+  assert.notEqual(pool.previewOrder('GLM-5.3-Flash', 1)[0].accountId, a.id, '限流账号不能出现在预览里')
+  assert.equal(pool.previewOrder('GLM-5.3-Flash', 1)[0].accountId, pool.pick('GLM-5.3-Flash').entry.id)
+  /** 另一个模型不受影响。 */
+  assert.equal(pool.previewOrder('GLM-5.3', 1)[0].accountId, a.id)
+
+  /**
+   * 忙标记（3009）：第一档避开；全都忙时 pick 回落第二档，预览也必须回落。
+   */
+  pool.markModelBusy(b.id, 'GLM-5.3', 60_000)
+  pool.markModelBusy(c.id, 'GLM-5.3', 60_000)
+  assert.equal(pool.previewOrder('GLM-5.3', 1)[0].accountId, a.id, '忙账号在有空闲账号时不进预览')
+  pool.markModelBusy(a.id, 'GLM-5.3', 60_000)
+  assert.equal(
+    pool.previewOrder('GLM-5.3', 1)[0].accountId,
+    pool.pick('GLM-5.3').entry.id,
+    '全部忙时两者回落同一档（按排序取第一个）',
+  )
+}))
+
+test('previewOrder: 停用账号不参与（与 pick 一致）', withPool(async (pool) => {
+  const a = pool.add(credential('a'), 'A').entry
+  const b = pool.add(credential('b'), 'B').entry
+  /** `store.patch/upsert` 校验凭据形状，坏凭据写不进去 —— 这里覆盖可构造的停用路径。 */
+  pool.setEnabled(a.id, false)
+  assert.equal(pool.previewOrder('GLM-5.3-Flash', 1)[0].accountId, b.id)
+  assert.equal(pool.pick('GLM-5.3-Flash').entry.id, b.id, '两者必须一致')
+  pool.setEnabled(a.id, true)
+  assert.equal(pool.previewOrder('GLM-5.3-Flash', 1)[0].accountId, a.id, '重新启用后回到首选')
+}))
+
+/**
+ * 用户实测故障：**面板显示额度开启，对话却说额度耗尽**。
+ * 面板口径 = 上游余额接口里所有已激活桶；对话准入 = 当前生效桶 + 1005 标记。
+ * `quotaState` 必须把「准入已拒」显式暴露出来，否则徽标只能继续显示健康账号。
+ */
+test('quotaState: 上游已判额度用尽时 available=false（解释面板/对话不一致）', withPool(async (pool) => {
+  const a = pool.add(credential('a'), 'A').entry
+  const model = 'GLM-5.3-Flash'
+
+  /** 没有否决位、也没有面板数据 → usable 未知（null），**不是**「有额度」。 */
+  assert.deepEqual(pool.quotaState(a.id, model, {}), {
+    available: null,
+    limited: false,
+    expired: false,
+    usable: null,
+    reason: null,
+  })
+  /** 面板确认有余量且无否决位 → 可用。 */
+  assert.equal(pool.quotaState(a.id, model, { available: true }).usable, true)
+
+  pool.markModelRateLimited(a.id, model, Date.now() + 3_600_000)
+  const limited = pool.quotaState(a.id, model, { available: true, expiresAt: null })
+  /** ⚠ 关键：面板口径 available=true 原样保留，冲突由 usable=false 表达。 */
+  assert.equal(limited.available, true, '面板口径不被准入否决洗掉')
+  assert.equal(limited.usable, false, '综合结论：不可用')
+  assert.equal(limited.limited, true)
+  assert.match(limited.reason, /额度用尽/)
+  /** 同一账号的其它模型不受影响。 */
+  assert.equal(pool.quotaState(a.id, 'GLM-5.3', { available: true }).usable, true)
+
+  /** 缓存里的生效桶已过期 → 同样不可用（提示为上游客口径的副作用）。 */
+  const expired = pool.quotaState(a.id, 'GLM-5.3', { available: true, expiresAt: Date.now() - 1 })
+  assert.equal(expired.usable, false)
+  assert.equal(expired.expired, true)
+}))
+
+test('noteRouted: outcome 记录「正在服务 / 已判耗尽」，换号后不停在失败账号上', withPool(async (pool) => {
+  const a = pool.add(credential('a'), 'A').entry
+  const b = pool.add(credential('b'), 'B').entry
+
+  pool.noteRouted(a.id, 'GLM-5.3-Flash', { outcome: 'attempting' })
+  assert.equal(pool.lastRouted().outcome, 'attempting')
+  /** 上游判 A 额度用尽（零内容 / 1005）→ 记录必须转成 exhausted。 */
+  pool.noteRouted(a.id, 'GLM-5.3-Flash', { outcome: 'exhausted', reason: 'HTTP 200 但零内容' })
+  assert.equal(pool.lastRouted().outcome, 'exhausted')
+  assert.match(pool.lastRouted().reason, /零内容/)
+  /** 换到 B 并命中 → 徽标显示 B（真实在服务的那个）。 */
+  pool.noteRouted(b.id, 'GLM-5.3-Flash', { outcome: 'ok' })
+  assert.equal(pool.lastRouted().accountId, b.id)
+  assert.equal(pool.lastRouted().outcome, 'ok')
+  assert.equal(pool.lastRouted().reason, undefined, '成功记录不带失败原因')
+}))

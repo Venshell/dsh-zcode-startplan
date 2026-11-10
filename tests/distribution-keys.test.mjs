@@ -8,11 +8,12 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  hardenCredentialFile,
   loadDistributionKeys,
   saveDistributionKeys,
   createDistributionKey,
@@ -67,9 +68,41 @@ test('loadDistributionKeys: 新格式往返 / 坏文件 / 空 key 列表', () =>
   assert.equal(roundTrip[0].token, created.token)
   assert.match(roundTrip[0].token, DISTRIBUTION_KEY_PATTERN)
 
+  /**
+   * ⚠ 0.10.0 语义变更：坏文件**必须抛错**，不再静默返回空表。
+   * 静默空表 + 下一次 save = 全部 key 被覆盖清空（用完即 429，且日志零输出）。
+   */
   writeFileSync(join(dir, 'distribution-keys.json'), '{ 坏 JSON')
-  assert.deepEqual(loadDistributionKeys(dir), [])
+  assert.throws(() => loadDistributionKeys(dir), /损坏/)
+  /** 备份回调被调用，且损坏文件本身不被删改（留给用户抢救）。 */
+  let backupOf
+  assert.throws(() =>
+    loadDistributionKeys(dir, {
+      backup: (file) => {
+        backupOf = `${file}.corrupt-test`
+        return backupOf
+      },
+    }),
+  )
+  assert.equal(typeof backupOf, 'string')
+  /** 缺少 keys 数组同样是结构损坏。 */
+  writeFileSync(join(dir, 'distribution-keys.json'), '{"nokeys":1}')
+  assert.throws(() => loadDistributionKeys(dir), /结构不对/)
+  /** 文件不存在 = 首次运行，仍是空表（不是损坏）。 */
   assert.deepEqual(loadDistributionKeys(join(dir, '不存在')), [])
+}))
+
+test('saveDistributionKeys: 落盘后收紧权限（POSIX mode + Windows ACL 尽力而为）', () => withDir((dir) => {
+  saveDistributionKeys(dir, [createDistributionKey('x')])
+  const file = join(dir, 'distribution-keys.json')
+  /**
+   * Windows 上 `fs.mode` 恒为 666（chmod 是空操作），真正的边界是 NTFS ACL ——
+   * 断言「调用了收紧逻辑」，而不是断言一个在 Windows 上必然为真的 mode。
+   */
+  const report = hardenCredentialFile(file)
+  assert.equal(report.ok, true)
+  assert.ok(['posix-mode', 'icacls'].includes(report.via), `实际 via=${report.via}`)
+  if (process.platform !== 'win32') assert.equal(statSync(file).mode & 0o777, 0o600)
 }))
 
 test('deleteDistributionKey 流程：按 id 删除后落盘文件里真正消失', () => withDir((dir) => {

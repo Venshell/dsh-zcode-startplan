@@ -23,6 +23,7 @@ import { AccountPool, SqliteStore, resolveDbFile, resolveDataDir } from '../lib/
 import { beginZcodeLogin, fetchBalance, fetchCaptchaConfig, fetchClaimablePlans, fetchModels, claimPlan, reportActivation, resolveLoginChannel, LOGIN_CHANNELS } from '../lib/upstream-api.js'
 import { CaptchaMinter } from '../lib/captcha/minter.js'
 import { ZcodePlanClient } from '../lib/plan-client.js'
+import { checkModelId } from '../lib/model-catalog.js'
 import { generateDeviceMid } from '../lib/upstream.js'
 
 const args = process.argv.slice(2)
@@ -44,13 +45,22 @@ const warn = (message) => process.stderr.write(`${message}\n`)
  * 退出看门狗（必须在任何命令执行前就位）。
  *
  * ⚠ **只**兜「异常路径上句柄没释放导致进程永不退出」，默认 15 秒。
- * 需要长时间等待的命令（`login` 等人工授权）必须先调 `clearExitWatchdog()` ——
- * 否则看门狗会在授权完成前杀掉进程，表现为
- * `Detected unsettled top-level await` + 退出码 13。
+ * 需要长时间等待的命令必须先调 `clearExitWatchdog()`，否则看门狗会在任务完成前
+ * 杀掉进程 —— 而且旧实现用的是 `process.exit(process.exitCode ?? 0)`：被杀时
+ * **退出码 0**，`probe` / `claim` / `captcha` 这类诊断命令会「假成功」，
+ * 比失败更误导（脚本据此判定全链路通过）。故：
+ *
+ * - 长命令（login / status / probe / claim / captcha）显式取消看门狗；
+ * - 兜底触发一律用**非零**退出码（`EXIT_WATCHDOG_CODE`），并说明被谁杀。
  */
 const EXIT_WATCHDOG_MS = 15_000
+const EXIT_WATCHDOG_CODE = 124
 let exitWatchdog = setTimeout(() => {
-  process.exit(process.exitCode ?? 0)
+  process.stderr.write(
+    `\n✗ 命令超过 ${EXIT_WATCHDOG_MS / 1000}s 未完成，已由看门狗强制退出（退出码 ${EXIT_WATCHDOG_CODE}）。` +
+    '这不是成功：常见原因是某个句柄（数据库 / fetch / 定时器）没释放。\n',
+  )
+  process.exit(process.exitCode ?? EXIT_WATCHDOG_CODE)
 }, EXIT_WATCHDOG_MS)
 /** 不要因为看门狗让进程多活 15 秒：它只是兜底，不持有存活权。 */
 exitWatchdog.unref()
@@ -59,6 +69,23 @@ exitWatchdog.unref()
 function clearExitWatchdog() {
   clearTimeout(exitWatchdog)
   exitWatchdog = undefined
+}
+
+/**
+ * CDP 调试端口的来源优先级（与插件侧 `minter.js` 一致，见 P8 审计）：
+ *
+ * `--port` 显式参数 → 环境变量 `ZCODE_START_PLAN_CDP_PORT` → 默认 9229。
+ *
+ * ⚠ 旧实现直接写死 `Number(option('port', '9229'))`，环境变量只在 minter 内部
+ * 生效 —— 用户按 README 设了环境变量，CLI 仍然连 9229，`captcha`/`claim`/`probe`
+ * 全部报「连不上调试端口」，而文档说这是可以配的。
+ */
+function resolveCdpPort(flagValue) {
+  const fromFlag = flagValue !== undefined ? Number(flagValue) : Number.NaN
+  if (Number.isInteger(fromFlag) && fromFlag >= 1 && fromFlag <= 65_535) return fromFlag
+  const fromEnv = Number(process.env['ZCODE_START_PLAN_CDP_PORT'] ?? '')
+  if (Number.isInteger(fromEnv) && fromEnv >= 1 && fromEnv <= 65_535) return fromEnv
+  return 9229
 }
 
 /** 打开账号库 + 账号池。 */
@@ -185,6 +212,11 @@ async function cmdList() {
 }
 
 async function cmdStatus() {
+  /**
+   * ⚠ 逐账号拉余额（每账号 30s 超时）+ 模型目录 + captcha 配置，账号一多必然超过
+   * 15s 看门狗 —— 旧实现会在打印完账号列表后**以退出码 0 静默截断**。
+   */
+  clearExitWatchdog()
   const { store, pool } = await openPool()
   try {
     const entries = printAccounts(pool)
@@ -223,12 +255,27 @@ async function cmdStatus() {
 }
 
 async function cmdProbe() {
+  /** ⚠ captcha mint 可达 75s + 退避重试，必然超过 15s 看门狗（见 EXIT_WATCHDOG_MS 注释）。 */
+  clearExitWatchdog()
   const model = option('model', 'GLM-5.3-Flash')
   const { store, pool } = await openPool()
-  const minter = new CaptchaMinter({ debugPort: Number(option('port', '9229')), log: warn })
+  const minter = new CaptchaMinter({ debugPort: resolveCdpPort(option('port')), log: warn })
   try {
     if (pool.list().length === 0) {
       warn('账号池为空。先运行 login。')
+      process.exitCode = 1
+      return
+    }
+    /**
+     * ⚠ 模型名先按目录校验（0.10.0 审计 S6）：拼错一个字母 → 上游回 200 零内容 →
+     * `plan-client` 判定「该账号×模型当日用尽」→ **账号被标限流到当日**。
+     * probe 是诊断命令，不该反过来污染账号状态。
+     */
+    const first = pool.list({ withCredentials: true })[0]
+    const catalog = first === undefined ? [] : (await fetchModels(first.credential)) ?? []
+    const check = checkModelId(model, catalog)
+    if (!check.ok) {
+      warn(`✗ ${check.reason}（可用：${check.available.join(', ') || '无'}）`)
       process.exitCode = 1
       return
     }
@@ -236,7 +283,7 @@ async function cmdProbe() {
     const started = Date.now()
     const result = await client.call({
       options: {
-        model,
+        model: check.id,
         messages: [{ role: 'user', content: [{ type: 'text', text: 'ping（只回复 pong）' }] }],
       },
       maxTokens: 64,
@@ -267,7 +314,9 @@ async function cmdProbe() {
 }
 
 async function cmdCaptcha() {
-  const minter = new CaptchaMinter({ debugPort: Number(option('port', '9229')), log: warn })
+  /** ⚠ 单次 mint 最长 ~75s，必须取消看门狗（否则「captcha 产出成功」永远打不出来）。 */
+  clearExitWatchdog()
+  const minter = new CaptchaMinter({ debugPort: resolveCdpPort(option('port')), log: warn })
   try {
     const probe = await minter.probe()
     log(`调试端口：${probe.ok ? '可达' : `不可达（${probe.reason}）`}`)
@@ -294,8 +343,10 @@ async function cmdCaptcha() {
 }
 
 async function cmdClaim() {
+  /** ⚠ 逐账号逐 plan mint captcha（每个最长 ~75s），必须取消看门狗。 */
+  clearExitWatchdog()
   const { store, pool } = await openPool()
-  const minter = new CaptchaMinter({ debugPort: Number(option('port', '9229')), log: warn })
+  const minter = new CaptchaMinter({ debugPort: resolveCdpPort(option('port')), log: warn })
   try {
     const entries = pool.list({ withCredentials: true })
     if (entries.length === 0) {
@@ -411,6 +462,10 @@ const handler = handlers[command]
 if (handler === undefined) {
   warn(`未知命令：${command}`)
   cmdHelp()
+  /**
+   * ⚠ 必须设**非零**退出码：旧实现只打印帮助、退出码 0，脚本层面会误判「执行成功」。
+   * 这里放在 `cmdHelp()` 之后是为了让帮助先正常输出到 stdout。
+   */
   process.exitCode = 1
 } else {
   /**
@@ -445,6 +500,10 @@ if (handler === undefined) {
  * 定时器）释放后**自然退出**，退出码由 exitCode 决定，stdout 也会在退出前正常排空。
  *
  * 只兜一个病态：真挂了不释放的句柄时进程永不退出。看门狗定义在文件顶部（见
- * `EXIT_WATCHDOG_MS`）；需要长时间等待的命令（`login`）会先取消它。
+ * `EXIT_WATCHDOG_MS`）；需要长时间等待的命令（login / status / probe / claim /
+ * captcha）会先取消它。
+ *
+ * ⚠ 未知命令 / 同步处理函数抛错必须把 `process.exitCode` 设成非零（1）——
+ * 否则脚本层面判定「命令成功」，而实际上一个字母都没执行。
  */
 

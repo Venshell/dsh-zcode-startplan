@@ -16,11 +16,50 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
 import { extractUpstreamError, readContentHead } from '../lib/sse.js'
-import { classifyUpstreamError } from '../lib/errors.js'
+import { classifyUpstreamError, extractBusinessCode, hasBusinessCode } from '../lib/errors.js'
 import { ZcodePlanClient } from '../lib/plan-client.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fixture = (file) => readFileSync(join(here, 'fixtures', file))
+
+/**
+ * 回归：数字业务码必须按**结构**判定，不能裸子串匹配。
+ *
+ * 实测踩点：网关 502 页正文里带 `Request ID 3f8a-1005-b27c`，旧实现
+ * `body.includes('1005')` 判成「额度用尽」→ 把一个健康账号标限流到**当日结束**。
+ */
+test('classifyUpstreamError: 非 JSON 错误页里的数字片段不再误判为额度用尽', () => {
+  const html = '<html><head><title>502 Bad Gateway</title></head><body><p>Request ID 3f8a-1005-b27c</p></body></html>'
+  assert.equal(classifyUpstreamError(500, html), 'other')
+  assert.equal(hasBusinessCode(html, 1005), false)
+  const another = '<html><body>Error 1113 detected in upstream module</body></html>'
+  assert.equal(classifyUpstreamError(502, another), 'other')
+})
+
+test('classifyUpstreamError: 结构化业务码（数字/字符串/嵌套）照旧识别', () => {
+  assert.equal(classifyUpstreamError(200, '{"code":1005,"msg":"exceed quota limit"}'), 'quota')
+  assert.equal(classifyUpstreamError(200, '{"code":"1005"}'), 'quota')
+  assert.equal(classifyUpstreamError(200, '{"error":{"code":3012}}'), 'risk')
+  assert.equal(classifyUpstreamError(200, '{"code":3009}'), 'concurrency')
+  assert.equal(classifyUpstreamError(200, '{"code":3007}'), 'captcha')
+})
+
+test('extractBusinessCode: 只认 JSON 结构，纯文本/HTML 一律 undefined', () => {
+  assert.equal(extractBusinessCode('{"code":0}'), 0)
+  assert.equal(extractBusinessCode('{"msg":"ok"}'), undefined)
+  assert.equal(extractBusinessCode('<html>1005</html>'), undefined)
+  /** 被包裹的 JSON 片段仍能取出（上游偶有前后缀）。 */
+  assert.equal(extractBusinessCode('gateway: {"code":3007} trailing'), 3007)
+})
+
+test('hasBusinessCode: 结构化 code 优先于兜底数字 token', () => {
+  /** 有结构化 code 时，出现别的数字串不算。 */
+  assert.equal(hasBusinessCode('{"code":3009,"msg":"1005 is a doc id"}', 1005), false)
+  assert.equal(hasBusinessCode('{"code":3009,"msg":"1005 is a doc id"}', 3009), true)
+  /** 无结构时裸业务码仍可识别（上游偶尔回纯文本）。 */
+  assert.equal(hasBusinessCode('1005 exceed quota limit', 1005), true)
+  assert.equal(hasBusinessCode('upstream 3009x timeout', 3009), false)
+})
 
 test('extractUpstreamError: 200 + {code:1005} 被识别为业务错误', () => {
   const error = extractUpstreamError({ code: 1005, msg: 'exceed quota limit' }, '')

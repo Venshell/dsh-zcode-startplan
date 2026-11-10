@@ -18,3 +18,7 @@ Thumbs.db
 # 临时探针（诊断用的临时脚本，不入库）
 _*.mjs
 _*.ts
+
+# ZCode CLI 适配器（本地工具，不随仓库分发；import 脚本会读写真实账号库）
+zcode-cli-adapter/
+

@@ -336,7 +336,8 @@ test('HTTP: 流式走真实 decoder 形状（read() 而非 for await），帧完
   }
   const gateway = await startOpenAiGateway({
     port: 0,
-    models: async () => [],
+    /** 目录必须有这个模型：0.10.0 起网关按目录做准入（未知模型 → 400，见 S6）。 */
+    models: async () => [{ id: 'GLM-5.3-Flash' }],
     log: () => {},
     planClient: { call: async () => ({ head: all.slice(0, 1), decoder }) },
     /** 0.9.5 起鉴权只认分发 key：让本测试的随机 key 有效。 */
@@ -346,7 +347,7 @@ test('HTTP: 流式走真实 decoder 形状（read() 而非 for await），帧完
     const response = await fetch(`${gateway.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+      body: JSON.stringify({ stream: true, model: 'GLM-5.3-Flash', messages: [{ role: 'user', content: 'hi' }] }),
     })
     const raw = await response.text()
     assert.doesNotMatch(raw, /is not a function/, 'decoder 必须是 read() 形状')
@@ -356,6 +357,97 @@ test('HTTP: 流式走真实 decoder 形状（read() 而非 for await），帧完
     assert.ok(deltas.some((delta) => delta.reasoning_content === '思考'), 'reasoning 帧')
     assert.ok(deltas.some((delta) => delta.content === '回答'), 'content 帧必须真的发出来')
     assert.ok(frames.some((frame) => frame.choices?.[0]?.finish_reason === 'stop'), 'finish 帧')
+  } finally {
+    await gateway.close()
+  }
+})
+
+/**
+ * 0.10.0 审计 S6：未知模型必须**在选号之前**被拒。
+ *
+ * 上游对不存在的模型回 200 + 零内容，`plan-client` 会把它判成「该账号×模型
+ * 当日用尽」并 `markModelRateLimited` —— 一次拼错的模型名就能把整个池子标限流到
+ * 当日。故网关必须在 `planClient.call` 之前按目录拦住。
+ */
+test('HTTP: 未知模型返回 400 且绝不触碰 planClient', async () => {
+  const { startOpenAiGateway } = await import('../lib/openai-gateway.js')
+  const key = `zsp-${(await import('node:crypto')).randomBytes(16).toString('base64url')}`
+  let called = 0
+  const gateway = await startOpenAiGateway({
+    port: 0,
+    models: async () => [{ id: 'GLM-5.3-Flash' }, { id: 'GLM-5.3' }],
+    log: () => {},
+    planClient: {
+      call: async () => {
+        called += 1
+        return { head: [], decoder: undefined }
+      },
+    },
+    findDistributionKey: (presented) => (presented === key ? { token: key, enabled: true, usage: {} } : undefined),
+  })
+  try {
+    const response = await fetch(`${gateway.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'GLM-5.3-Flas（拼错）', messages: [{ role: 'user', content: 'hi' }] }),
+    })
+    assert.equal(response.status, 400)
+    const payload = await response.json()
+    assert.equal(payload.error.code, 'model_not_found')
+    assert.deepEqual(payload.error.available, ['GLM-5.3-Flash', 'GLM-5.3'])
+    assert.equal(called, 0, '未知模型不得进入选号链路（否则账号会被标限流到当日）')
+
+    /** 大小写不敏感匹配成功，且下发的是目录里的规范大小写。 */
+    let seenModel
+    const okGateway = await startOpenAiGateway({
+      port: 0,
+      models: async () => [{ id: 'GLM-5.3-Flash' }],
+      log: () => {},
+      planClient: {
+        call: async ({ options }) => {
+          seenModel = options.model
+          return { head: [{ type: 'text-delta', text: 'x' }, { type: 'finish', reason: { kind: 'stop' } }], decoder: undefined }
+        },
+      },
+      findDistributionKey: (presented) => (presented === key ? { token: key, enabled: true, usage: {} } : undefined),
+    })
+    try {
+      const res2 = await fetch(`${okGateway.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'hi' }] }),
+      })
+      assert.equal(res2.status, 200)
+      assert.equal(seenModel, 'GLM-5.3-Flash', '上游应看到目录里的规范 id')
+    } finally {
+      await okGateway.close()
+    }
+  } finally {
+    await gateway.close()
+  }
+})
+
+/**
+ * 0.10.0 审计 S5：网关**刻意不设 CORS**。
+ * 预检不带 Authorization ⇒ 任何 `Access-Control-Allow-Origin: *` 都在鉴权之前生效，
+ * 而分发 key 是静态 Bearer：浏览器持钥即可跨源烧额度。
+ */
+test('HTTP: 预检不再回 Access-Control-Allow-Origin', async () => {
+  const { startOpenAiGateway } = await import('../lib/openai-gateway.js')
+  const gateway = await startOpenAiGateway({
+    port: 0,
+    models: async () => [{ id: 'GLM-5.3-Flash' }],
+    log: () => {},
+    planClient: { call: async () => ({ head: [], decoder: undefined }) },
+    findDistributionKey: () => undefined,
+  })
+  try {
+    const response = await fetch(`${gateway.baseUrl}/v1/chat/completions`, {
+      method: 'OPTIONS',
+      headers: { origin: 'https://evil.example', 'access-control-request-method': 'POST' },
+    })
+    assert.equal(response.headers.get('access-control-allow-origin'), null)
+    assert.notEqual(response.status, 204)
   } finally {
     await gateway.close()
   }

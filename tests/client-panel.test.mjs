@@ -668,6 +668,37 @@ test('AccountCard: 0.7.0 移除「使用」按钮（统一选号按到期时间�
   assert.doesNotMatch(src, /onUse/, 'onUse 链路应一并移除')
 })
 
+/**
+ * 1.0.1：限流 chip 自带清除按钮（×）。此前「清除限流」只存在于 CLI
+ * （`node bin/cli.mjs reset`）——用户报「哪里有按钮」，因为它根本不在 UI 里。
+ */
+test('AccountCard: 限流 chip 带 × 清除按钮，点击调 /reset-limits（带 id+model）', () => {
+  const panel = buildPanel()
+  const calls = []
+  const tree = panel.render(panel.AccountCard({
+    account: { ...baseAccount, modelRateLimits: { 'GLM-5.3-Flash': Date.now() + 3600_000 } },
+    modelListVisible: true,
+    onResetLimit: (model) => calls.push(model),
+  }))
+  const chips = findAll(tree, (node) => node.props?.className === 'zsp-chip' && node.props['data-limited'] === 'true')
+  assert.equal(chips.length, 1, '一条限流 chip')
+  const buttons = findAll(chips[0], (node) => node.props?.className === 'zsp-chip-x')
+  assert.equal(buttons.length, 1, 'chip 内有一个 × 按钮')
+  assert.equal(buttons[0].props['aria-label'], '清除 GLM-5.3-Flash 的限流标记')
+  buttons[0].props.onClick()
+  assert.deepEqual(calls, ['GLM-5.3-Flash'], '点击把该模型 id 报给 onResetLimit')
+})
+
+test('AccountCard: 无限流时不渲染 × 按钮', () => {
+  const panel = buildPanel()
+  const tree = panel.render(panel.AccountCard({
+    account: baseAccount,
+    modelListVisible: true,
+    onResetLimit: () => {},
+  }))
+  assert.equal(findAll(tree, (node) => node.props?.className === 'zsp-chip-x').length, 0)
+})
+
 test('TotalQuota: 汇总各账号余额桶、按到期日分层、跳过未加载账号', () => {
   const panel = buildPanel()
   const now = Date.now()
