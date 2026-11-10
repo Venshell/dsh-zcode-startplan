@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { buildZcodeHeaders, compareZcodeAppVersion, nextUtc8DayStartMs, toEpochMs, zcodeVersionGatedAppVersion } from '../lib/upstream.js'
+import { buildZcodeHeaders, compareZcodeAppVersion, nextUtc8DayStartMs, toEpochMs, zcodeVersionGatedAppVersion, ZCODE_VERSION_GATED_MIN_APP_VERSION } from '../lib/upstream.js'
 import {
   classifyUpstreamError,
   concurrencyRetryDelayMs,
@@ -292,19 +292,22 @@ test('fetchBalance: 单桶时行为不变（buckets 仍下发，面板走汇总�
   assert.equal(balance.total, 100)
 })
 
-// ── 版本门控（0.8.0，参考实现 deepseek-harness-codearts 的实测结论）──
+// ── 版本门控（服务端会随官方版本抬高下限，见 upstream.js 的观测表）──
 
-test('版本门控: marketing/claim 的 app_version 与 3.16.3 取较大者', () => {
+test('版本门控: marketing/claim 的 app_version 与下限取较大者', () => {
   /** 凭据旧版本 → 抬到门控下限（低版本投放恒空、claim 1004）。 */
-  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.14.3' }), '3.16.3')
-  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.16.2' }), '3.16.3')
+  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.14.3' }), ZCODE_VERSION_GATED_MIN_APP_VERSION)
+  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.16.2' }), ZCODE_VERSION_GATED_MIN_APP_VERSION)
+  /** 2026-11-10 实测：3.16.3 已被服务端判为「旧」（deliveries 恒空），必须抬到 3.17.2。 */
+  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.16.3' }), ZCODE_VERSION_GATED_MIN_APP_VERSION)
+  assert.equal(ZCODE_VERSION_GATED_MIN_APP_VERSION, '3.17.2')
   /** 凭据更新 → 用它自己的版本（向前兼容，不降级）。 */
-  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.17.0' }), '3.17.0')
+  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.18.0' }), '3.18.0')
   /** 缺失/脏值 → 门控下限（脏值还会让 Headers() 抛 TypeError，必须挡住）。 */
-  assert.equal(zcodeVersionGatedAppVersion({}), '3.16.3')
-  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.16.3-beta.1' }), '3.16.3')
-  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.016.3' }), '3.16.3')
-  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.16.3\r\nX-Injected: 1' }), '3.16.3')
+  assert.equal(zcodeVersionGatedAppVersion({}), ZCODE_VERSION_GATED_MIN_APP_VERSION)
+  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.16.3-beta.1' }), ZCODE_VERSION_GATED_MIN_APP_VERSION)
+  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.016.3' }), ZCODE_VERSION_GATED_MIN_APP_VERSION)
+  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.16.3\r\nX-Injected: 1' }), ZCODE_VERSION_GATED_MIN_APP_VERSION)
 })
 
 test('版本门控: buildZcodeHeaders 的 appVersion 覆盖只影响本次请求头', () => {
@@ -312,7 +315,10 @@ test('版本门控: buildZcodeHeaders 的 appVersion 覆盖只影响本次请求
   /** 不传 = 凭据版本（推理路径维持既有消融矩阵口径）。 */
   assert.equal(buildZcodeHeaders(cred)['X-ZCode-App-Version'], '3.14.3')
   /** 门控路径显式传 = 抬版本，且不改凭据。 */
-  assert.equal(buildZcodeHeaders(cred, { appVersion: zcodeVersionGatedAppVersion(cred) })['X-ZCode-App-Version'], '3.16.3')
+  assert.equal(
+    buildZcodeHeaders(cred, { appVersion: zcodeVersionGatedAppVersion(cred) })['X-ZCode-App-Version'],
+    ZCODE_VERSION_GATED_MIN_APP_VERSION,
+  )
   assert.equal(cred.app_version, '3.14.3', '凭据本身绝不被改写')
 })
 

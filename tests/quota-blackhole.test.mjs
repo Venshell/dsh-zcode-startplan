@@ -11,11 +11,22 @@
  * ```
  *
  * 而同一时刻 `last_error` 里早就写着 `额度用尽（1005 exceed quota limit）`。
- * 三条修复各自对应一组用例：
  *
- * 1. **选号前置**：`last_error` 已是 1005/1113 → 根本不发请求，立刻 QUOTA；
+ * ## 2026-11-10 判据变更（本文件已随之重写）
+ *
+ * 早期版本把 `last_error` 当作**选号前置判据**：历史文本里出现过 1005 就不发请求。
+ * 该判据已从 `pool.js` 删除 —— `last_error` 是无时间戳的历史文本，额度次日恢复后
+ * 那行仍写着 1005，于是账号会被**永久**卡死（误判一次的代价是「无限期不可用」，
+ * 比多付一次往返贵得多）。
+ *
+ * 权威判据只剩**上游本次响应**：真耗尽 → 1005 → 写当日硬标记（`model_rate_limits`）
+ * → 由硬标记挡住后续选号。所以本文件现在锁的是：
+ *
+ * 1. **`last_error` 不参与选号**：无论它写着 1005 / 1113 / 其它，请求都照样发出，
+ *    只有在真的吃回 1005 之后才落硬标记（「先验证、后下结论」）；
  * 2. **首内容超时**：上游 200 却永不出流 → 首内容超时（远小于宿主 ~300s）中止；
- * 3. **错误码保真**：黑洞落 `TIMEOUT`（在回退名单里），不落 `PROVIDER_ERROR`。
+ * 3. **错误码保真**：黑洞落 `TIMEOUT`（在回退名单里），不落 `PROVIDER_ERROR`；
+ *    `last_error` 也**不**参与终态错误码 —— 否则用户会看到「额度用尽」而真因是超时。
  */
 
 import test from 'node:test'
@@ -28,7 +39,15 @@ import { HangingStream } from './support/hanging-stream.mjs'
 
 const CREDENTIAL = { zcode_jwt: 'jwt-1', device_mid: 'dev-1', user_id: 'u-1' }
 
-/** 内存版账号池（含 issue #4 用到的 `hasQuotaError` / 失败原因记录）。 */
+/**
+ * 内存版账号池，**只实现真池（`lib/pool.js`）导出给 plan-client 的那几个方法**。
+ *
+ * ⚠ 刻意不再实现 `hasQuotaError`、也不在 `pick` 里读 `last_error` ——
+ * 那正是被删掉的判据。替身若自己实现了它，测试就会「全绿但被测行为已不存在」
+ * （本次重写的原因）。替身必须与真池**同语义**：
+ * - 硬过滤只看 `model_rate_limits`（当日标记）；
+ * - `last_error` 只是展示字段，选号时一律无视。
+ */
 function fakePool(entries = [{ id: 'acct-a' }]) {
   const state = entries.map((entry) => ({
     nickname: entry.id,
@@ -41,36 +60,20 @@ function fakePool(entries = [{ id: 'acct-a' }]) {
   return {
     list: () => state,
     get: (id) => state.find((entry) => entry.id === id),
-    hasQuotaError(accountId) {
-      const message = state.find((entry) => entry.id === accountId)?.last_error
-      return typeof message === 'string' && /1005|1113|exceed quota limit|余额不足/.test(message)
-    },
-    pick(model, exclude, sink) {
+    /**
+     * 与真池同语义（`AccountPool.pick`）：`(modelId, exclude) => { entry, credential } | null`。
+     * 判据只有「启用 + 未被 exclude + 该模型不在限流期」，**不看 `last_error`**。
+     */
+    pick(model, exclude) {
       const excluded = exclude ?? new Set()
       const now = Date.now()
-      let hit = null
-      for (const entry of state) {
-        if (!entry.enabled || excluded.has(entry.id)) continue
-        if ((entry.model_rate_limits[model] ?? 0) > now) continue
-        /**
-         * 与真池同语义（issue #4）：`last_error` 已是额度用尽 → 不进候选，
-         * 并让调用方知道「是被额度挡掉的」（`sink.exhausted`），
-         * 这样「为什么一个候选都没有」能说清真因。
-         */
-        if (/1005|1113|exceed quota limit|余额不足/.test(entry.last_error ?? '')) {
-          sink?.exhausted.add(entry.id)
-          continue
-        }
-        hit = entry
-        break
-      }
-      /** 与真池一致：返回 `{ entry, credential }`，不是账号条目本身。 */
-      return hit === null ? null : { entry: hit, credential: hit.credential }
-    },
-    /** 真池的候选视图：供 plan-client 报「都被额度挡掉了」用。 */
-    candidates(model, exclude, sink) {
-      const picked = this.pick(model, exclude, sink)
-      return picked === null ? [] : [picked.entry]
+      const hit = state.find(
+        (entry) =>
+          entry.enabled &&
+          !excluded.has(entry.id) &&
+          !((entry.model_rate_limits[model] ?? 0) > now),
+      )
+      return hit === undefined ? null : { entry: hit, credential: hit.credential }
     },
     markModelRateLimited(accountId, modelId, resetAt) {
       const hit = state.find((entry) => entry.id === accountId)
@@ -102,11 +105,37 @@ const okResponse = (body) => ({
   body,
 })
 
-// ─────────────────────────── 1. 选号前置（秒级） ───────────────────────────
+/** 上游真回 1005 的那种响应（HTTP 200 包裹业务错误，本渠道实测形态）。 */
+const quotaResponse = () => ({
+  ok: true,
+  status: 200,
+  headers: new Headers({ 'content-type': 'application/json' }),
+  body: new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"code":1005,"msg":"exceed quota limit"}'))
+      controller.close()
+    },
+  }),
+})
 
-test('#4 选号前置：last_error 已是 1005 → 一条请求都不发，立刻 QUOTA', async () => {
+const textStream = () =>
+  new ReadableStream({
+    start(controller) {
+      controller.enqueue(
+        new TextEncoder().encode(
+          'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n',
+        ),
+      )
+      controller.close()
+    },
+  })
+
+// ────────────────── 1. `last_error` 不再是选号判据（先验证、后下结论） ──────────────────
+
+test('#4 last_error 写着 1005 → **仍然发请求**（历史文本不是判据）；上游真回 1005 才落硬标记', async () => {
   const pool = fakePool([
-    // 硬标记表里**没有**这个模型的记录 —— 正是「漏过滤」才会发出去的那条路。
+    // 硬标记表里**没有**这个模型的记录 —— 以前正是「漏过滤」才会发出去的那条路，
+    // 现在它是**唯一正确的路**：历史文本不许替上游下结论。
     { id: 'acct-a', last_error: '额度用尽（1005 exceed quota limit）——该账号在这个模型上的免费额度已用完，请等待额度重置或更换账号。' },
   ])
   let calls = 0
@@ -115,7 +144,7 @@ test('#4 选号前置：last_error 已是 1005 → 一条请求都不发，立�
     minter,
     fetchImpl: async () => {
       calls += 1
-      return okResponse(new HangingStream().stream)
+      return quotaResponse()
     },
   })
 
@@ -125,17 +154,23 @@ test('#4 选号前置：last_error 已是 1005 → 一条请求都不发，立�
    * 终止块会经 `adapter` 的脱敏闸换成中性文案（issue #2），细节只进日志。
    */
   const failure = await client.call({ options: baseOptions }).then(
-    () => assert.fail('已判额度用尽时必须失败，而不是发出请求'),
+    () => assert.fail('上游已回 1005 时必须失败，而不是当成成功'),
     (error) => error,
   )
+  assert.equal(calls, 1, '`last_error` 写着 1005 也照常发请求 —— 判据是上游本次响应，不是历史文本')
   assert.equal(failure.code, 'QUOTA', '额度用尽必须是 QUOTA，不能落成 PROVIDER_ERROR')
-  assert.match(failure.message, /额度用尽/)
-  assert.match(failure.message, /1005/, '文案要带上真因，别只给「超时或不可用」')
-  assert.equal(calls, 0, '已判额度用尽的账号绝不能再发请求（那正是黑洞的来源）')
-  assert.ok(Date.now() - startedAt < 1000, '快速失败路径必须秒级返回')
+  /** 终态文案来自「换轮」分支（已用尽 / 等待重置），真因（1005 原文）必须一并带上。 */
+  assert.match(failure.message, /已用尽|额度用尽/)
+  assert.match(failure.message, /1005/, '文案要带上真因（上游原文），别只给「已用尽」')
+  /** 现在证据来自**本次**上游响应，所以文案里带得出真因（含 1005 细节）。 */
+  assert.match(pool.list()[0].last_error, /1005/, '真回 1005 之后 last_error 才被改写成上游真因')
+  const mark = pool.list()[0].model_rate_limits['GLM-5.3-Flash']
+  assert.equal(typeof mark, 'number', '拿到 1005 才写当日硬标记')
+  assert.ok(mark > Date.now(), '硬标记必须落在未来（当日结束），下次选号才挡得住')
+  assert.ok(Date.now() - startedAt < 1_000, '快速失败路径必须秒级返回')
 })
 
-test('#4 选号前置：1113（余额不足）同样快速失败', async () => {
+test('#4 last_error 写着 1113（余额不足）同样先发请求，不据它判死账号', async () => {
   const pool = fakePool([{ id: 'acct-a', last_error: '余额不足或无可用资源包（1113）' }])
   let calls = 0
   const client = new ZcodePlanClient({
@@ -143,14 +178,39 @@ test('#4 选号前置：1113（余额不足）同样快速失败', async () => {
     minter,
     fetchImpl: async () => {
       calls += 1
-      return okResponse(new HangingStream().stream)
+      return quotaResponse()
     },
   })
   await assert.rejects(() => client.call({ options: baseOptions }), { code: 'QUOTA' })
-  assert.equal(calls, 0)
+  assert.equal(calls, 1, '1113 的历史文本同样不是判据')
 })
 
-test('#4 选号前置：last_error 只是并发限流（3009）/网络抖动 → 照常发请求', async () => {
+test('#4 last_error 已是 1005、但上游这次正常 → 请求成功，硬标记保持干净', async () => {
+  /**
+   * 这条是「永久卡号」bug 的回归锁：额度次日恢复后 `last_error` 仍写着 1005，
+   * 若还按它前置过滤，账号会**永远**选不到 —— 这里必须能正常命中。
+   */
+  const pool = fakePool([{ id: 'acct-a', last_error: '额度用尽（1005 exceed quota limit）' }])
+  let calls = 0
+  const client = new ZcodePlanClient({
+    pool,
+    minter,
+    fetchImpl: async () => {
+      calls += 1
+      return okResponse(textStream())
+    },
+  })
+  const result = await client.call({ options: baseOptions })
+  assert.equal(result.accountId, 'acct-a')
+  assert.equal(calls, 1)
+  assert.equal(
+    pool.list()[0].model_rate_limits['GLM-5.3-Flash'],
+    undefined,
+    '上游没判额度用尽，就不许写硬标记',
+  )
+})
+
+test('#4 last_error 只是并发限流（3009）/网络抖动 → 照常发请求', async () => {
   /** 3009 是瞬态，把它当额度用尽会把用户钉死在「等次日重置」上。 */
   const pool = fakePool([{ id: 'acct-a', last_error: '上游并发限流（3009 model concurrency limit exceeded）' }])
   let calls = 0
@@ -160,15 +220,7 @@ test('#4 选号前置：last_error 只是并发限流（3009）/网络抖动 →
     concurrencyRetryBaseMs: 1,
     fetchImpl: async () => {
       calls += 1
-      return okResponse(
-        new ReadableStream({
-          start(controller) {
-            const encoder = new TextEncoder()
-            controller.enqueue(encoder.encode('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n'))
-            controller.close()
-          },
-        }),
-      )
+      return okResponse(textStream())
     },
   })
   const result = await client.call({ options: baseOptions })
@@ -176,7 +228,11 @@ test('#4 选号前置：last_error 只是并发限流（3009）/网络抖动 →
   assert.equal(calls, 1)
 })
 
-test('#4 钉定账号：last_error 已是 1005 → 明确报错，且一条请求都不发', async () => {
+test('#4 钉定账号：last_error 已是 1005 → **照常发请求**（钉定更不该被历史文本卡死）', async () => {
+  /**
+   * 钉定模式没有「换号」这条出路：若按 `last_error` 前置拦截，用户会看到
+   * 「已判额度用尽」而完全无法自救（只能手动清除）。这里锁死「先问上游」。
+   */
   const pool = fakePool([{ id: 'acct-a', last_error: '额度用尽（1005 exceed quota limit）' }])
   let calls = 0
   const client = new ZcodePlanClient({
@@ -184,18 +240,12 @@ test('#4 钉定账号：last_error 已是 1005 → 明确报错，且一条请�
     minter,
     fetchImpl: async () => {
       calls += 1
-      return okResponse(new HangingStream().stream)
+      return okResponse(textStream())
     },
   })
-  await assert.rejects(
-    () => client.call({ options: baseOptions, pinnedAccountId: 'acct-a' }),
-    (error) => {
-      assert.equal(error.code, 'QUOTA')
-      assert.match(error.message, /未发出/, '文案要说明「本次请求未发出」')
-      return true
-    },
-  )
-  assert.equal(calls, 0)
+  const result = await client.call({ options: baseOptions, pinnedAccountId: 'acct-a' })
+  assert.equal(result.accountId, 'acct-a')
+  assert.equal(calls, 1, '钉定账号也必须先发请求再判 —— 不许据 last_error 直接报错')
 })
 
 // ─────────────────────────── 2. 首内容超时 ───────────────────────────
@@ -273,6 +323,30 @@ test('#4 错误码保真：黑洞落 TIMEOUT（可回退），不落 PROVIDER_ER
     pool.list()[0].model_rate_limits['GLM-5.3-Flash'] ?? 0,
     0,
     '黑洞不写当日硬标记：没有 1005 证据就不该锁一整天（抖动一次 = 白等一天）',
+  )
+})
+
+test('#4 黑洞的终态码**不受** last_error 影响（历史 1005 不许把 TIMEOUT 洗成 QUOTA）', async () => {
+  /**
+   * 以前「选号前置」若按 `last_error` 短路，黑洞会被报告成「额度用尽」——
+   * 用户于是去等次日重置，而真因是上游不出流（TIMEOUT 本可改道）。
+   * 这条锁死：终态码只由**本次**失败类型决定。
+   */
+  const pool = fakePool([{ id: 'acct-a', last_error: '额度用尽（1005 exceed quota limit）' }])
+  const client = new ZcodePlanClient({
+    pool,
+    minter,
+    headTimeoutMs: 20,
+    readTimeoutMs: 20,
+    fetchImpl: async () => okResponse(new HangingStream().stream),
+  })
+  await assert.rejects(
+    () => client.call({ options: baseOptions }),
+    (error) => {
+      assert.equal(error.code, 'TIMEOUT', '本次是黑洞 → TIMEOUT，与 last_error 里的 1005 无关')
+      assert.match(error.message, /没有产出任何内容/)
+      return true
+    },
   )
 })
 

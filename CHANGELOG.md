@@ -3,6 +3,95 @@
 本文件记录**每次修复背后的宿主契约**。只看 diff 看不出「为什么不能改回去」，
 所以把约束与症状一起写下来。
 
+## 未发布 — 活动列表为空：版本门控动态化 + 领取链路三处修复
+
+完整排查记录见 [`docs/claim-forensics-2026-11.md`](docs/claim-forensics-2026-11.md)。
+
+### 症状
+
+面板活动列表为空（或只有一行无名灰字），官方 ZCode 客户端却能正常看到并领取；
+直接 claim 返回 `1004 no permission`；领完按钮不变灰；自动领取拨盘开着但从不生效。
+
+### 根因（按重要性）
+
+1. **版本门控被服务端抬高**：`X-ZCode-App-Version < 官方当前版本` 时
+   `marketing/touch` 恒返回 `deliveries: []`，与「本来没活动」同形。
+   实测消融（同账号同 `device_mid`）：`3.16.3` → 0 条，`3.17.2` → 1 条。
+   门控已抬高两次（`3.14.3` → `3.16.3` → `3.17.2`），钉死常量必然过期。
+2. 领取记录只扫了错误的字段位置（把插件自己派生的 `balance.pending`
+   当成上游数组；实际上游只有 `data.plans[]`）。
+3. `ctx.timer.interval` **首轮要等满一个完整周期**才触发，自动领取在
+   「默认 6 小时」内一次都不跑（`lastRunAt` 恒 0）。
+
+### 修复
+
+| 位置 | 改动 |
+|---|---|
+| `lib/version-probe.js`（新增） | 从 `https://zcode.z.ai/` 首页 HTML 的 `releases/<x.y.z>/` 提取最高版本；24h 缓存、8s 超时、失败返回 undefined 不抛 |
+| `lib/upstream.js` | 门控下限改为运行期可变：`setGatedMinAppVersion()` **只抬高不降低**；`zcodeVersionGatedAppVersion()` 读运行期值 |
+| `lib/assemble.js` | 挂载时**异步**抓官方版本抬高下限（失败不影响启动）；自动领取改为 60 秒心跳 + 到点判定 |
+| `lib/upstream-api.js` | `fetchClaimedPlans` 扫 `data.plans[]`，按 `unit_type` 求和，`effective_at` 秒→毫秒；`pending` 由 `effective_at > server_time` 判定 |
+| `lib/manage-routes.js` | 回填带元数据、恢复活动前缀白名单、`/claimable` 增 `sources:{campaign,records}`、拨开关立即跑一轮 |
+| `client.js` | 领取成功后**重新探测**（`catch` 分支也探，兼容幂等 1003）；三态文案区分「探测失败 / 确实没有 / 待生效」 |
+
+测试：**273/273 通过**。
+
+### 排查过程中的错误归因（教训）
+
+`pending[]` 不是上游字段；`1004` 不能归因到「设备配额」（时序混杂）；
+`Page.setDocumentContent` 不执行内联脚本；CDP 合成点击的 `isTrusted` 是 `true`；
+captcha 宿主方案调的是 `instance.startTracelessVerification()` 而非点击。
+详见排查记录第 5 节。
+
+## 未发布 — 3012 独立错误码 + 自动清除限流 + 判据收敛
+
+### 症状（issue #3）
+
+界面报 `上游风控拦截（3012 unusual activity）… 请勿连续重试`，但同一条消息里
+写着 **`模型请求重试已取消（3/5）`** —— 文案在劝阻，宿主已经替你重试了 3 次。
+
+同时：账号额度明明已恢复（`/routing` 显示 `usable: true`），**统一选号却选不出账号**。
+
+### 根因
+
+1. **3012 被抛成 `RATE_LIMIT`**（`plan-client.js` 两处 risk 分支）。
+   `errors.js` 的 `isFallbackWorthyCode` 把 `RATE_LIMIT` 列为「值得回退」，
+   宿主的 `llm-retry` 也重试它 ⇒ 每次重试都在加重账号冷却（30 分钟 → 24 小时 → 停用）。
+   **码与语义相反**：注释三次写「绝不重试」，代码给的是可重试码。
+2. **`last_error` 被当成实时判据**。它是历史文本、**没有时间戳**，额度次日恢复后
+   那行 1005 还在，`quotaBlock` 于是**永久跳过该账号**。
+   实测：四账号 `model_rate_limits` 全空（当日标记已过期）、`/routing` 全部 `usable: true`，
+   但选号因 `last_error` 判 limited ⇒ 「额度已开但选不出号」。
+3. **钉定与自动选号判据矛盾**：钉定（`plan-client.js:232`）用 `last_error` 秒拒，
+   自动选号已不用 ⇒ 同一账号一个拒绝一个放行。
+4. **`sink.exhausted` 恒为空**：写入方被删后，`plan-client` 里
+   「全部账号额度用尽…已秒级快速失败」整段不可达。
+5. **凭据失效被标成 `QUOTA`**：401 引导用户「等次日额度重置」，而钉定路径正确报 `AUTH`。
+
+### 修复
+
+| 位置 | 改动 |
+|---|---|
+| `lib/errors.js` | 新增 `RISK_BLOCKED_CODE`（**不进** `isFallbackWorthyCode`）与 `codeForUpstreamKind(kind)`（分类→码的唯一映射点，含编排层补的 `timeout → TIMEOUT`） |
+| `lib/fallback.js` | `FRIENDLY` 新增 `RISK_BLOCKED` 中性短句；`RATE_LIMIT` 语义收窄为「只表示 3009 并发限流」 |
+| `lib/plan-client.js` | 两处 risk 分支抛 `RISK_BLOCKED`，**抛错前**调 `#clearRateLimitOnRisk()` 自动清该账号×该模型的限流标记；删除钉定的 `hasQuotaError` 判据；删除 `quotaSink`/`quotaBlocked` 死链路；`auth` 不再被误标 `QUOTA`；5 处重复三元链收敛到 `codeForUpstreamKind` |
+| `lib/pool.js` | 删除 `hasQuotaError`、`quotaBlock`、`candidates` 的 `sink` 参数与 `exhausted` Set；候选筛选**只看 `model_rate_limits` 硬标记** |
+| `lib/manage-routes.js` | `/reset-limits` 返回 `clearedModels` 与 `lastErrorBefore`，清标记后**同时清 `last_error`**；`/routing` 与 `/summary` 新增 `riskBlocked`；`1004` 文案改为「版本门控最常见」 |
+| `client.js` | `RISK_BLOCKED` 展示为「已自动清除限流标记，可立即重试」；模型栏 ⚠ 风控徽标；账号卡风控 chip；清除限流结果提示条 |
+| `lib/assemble.js` | 删除 4 个纯转发包装；删除描述已不存在实现的孤儿 JSDoc |
+
+测试：**273/273 通过**，且用**变异测试**验证过 8 个变异体全部被检出
+（含「恢复 `last_error` 扫描」「改回 `RATE_LIMIT`」「删掉自动清除」）。
+
+### 硬约束（改回去会怎样）
+
+| 约束 | 原因 |
+|---|---|
+| `RISK_BLOCKED` **不得**进 `isFallbackWorthyCode` | 3012 有**账号级**冷却惩罚；换通道常是同一批账号，改道等于换个号继续撞 |
+| `last_error` **不得**再作为选号判据 | 无时间戳的历史文本，会让账号永久选不出；真耗尽由本次响应写入 `model_rate_limits` 硬标记 |
+| 3012 **必须**自动清限流标记 | 用户明确要求：3012 可能是误判，不该让账号被自己的标记锁死 |
+| `quotaState` 与 `/routing` 的 `limited` 必须同源 | 两边口径不一致就会出现「徽标说能用、选号说没号」 |
+
 ## 1.0.1 — 额度用尽后的「上游黑洞」与终止失败块脱敏（issue #4 / #2）
 
 ### #4：1005 之后仍然发请求，黑洞挂满 300s × 2，最后只报「超时或不可用」

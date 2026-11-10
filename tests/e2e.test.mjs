@@ -116,7 +116,12 @@ test('adapter.stream：上游失败时以 terminal finish 错误 chunk 收尾（
   assert.equal(finish.type, 'finish')
   /** 宿主读 chunk.reason（BlockAssembler）；kind 在顶层会被吞成正常结束。 */
   assert.equal(finish.reason.kind, 'error')
-  assert.equal(finish.reason.failure.code, 'RATE_LIMIT')
+  /**
+   * 3012 的码是**独立**的 `RISK_BLOCKED`（不是 RATE_LIMIT）：RATE_LIMIT 收窄为
+   * 「只表示 3009 并发限流」。宿主按码路由 —— 混同会让它对风控做指数退避重试，
+   * 而风控有账号级累积惩罚（30 分钟 → 24 小时 → 停用）。
+   */
+  assert.equal(finish.reason.failure.code, 'RISK_BLOCKED')
   /**
    * issue #2：**终止块必须已脱敏** —— code 保真，message 只说人话。
    * 上游原文（含 3012 业务码、unusual activity）只该出现在插件日志里；
@@ -124,7 +129,10 @@ test('adapter.stream：上游失败时以 terminal finish 错误 chunk 收尾（
    */
   assert.doesNotMatch(finish.reason.failure.message, /3012/)
   assert.doesNotMatch(finish.reason.failure.message, /unusual\s+activity/i)
-  assert.match(finish.reason.failure.message, /限流|风控/)
+  assert.match(finish.reason.failure.message, /风控/)
+  /** 文案要能区分「不是额度问题」，并说明已自动清除限流标记（否则用户会去等重置）。 */
+  assert.match(finish.reason.failure.message, /非额度问题/)
+  assert.match(finish.reason.failure.message, /清除/)
 })
 
 test('adapter.listModels / resolveModel：模型元数据带上下文窗口与输入模态', async (t) => {
@@ -316,14 +324,20 @@ test('apply：等 llm 出现后注册 adapter + 状态工具，dispose 时收尾
   assert.equal(tools.length, 1)
   assert.equal(tools[0].name, 'zcode_start_plan_status')
   /**
-   * 两条定时器：①每小时清过期限流标记；②自动领取轮询（常驻挂着，开关在 tick 内判断）。
+   * 两条定时器：①每小时清过期限流标记；②自动领取心跳（60 秒）。
    * ⚠ 自动领取**必须常驻**只注册一次 —— 拨盘切换不能重启宿主才能生效，
    * 所以不能把它做成「开启时才注册」。
+   *
+   * ⚠ 心跳周期是 **60 秒**，不是 `autoClaim.intervalMs`：旧实现直接把轮询间隔
+   * （默认 30 分钟/6 小时）当定时器周期，而 `ctx.timer.interval` 首轮要等满一个
+   * 周期才触发 ⇒ 宿主启动后最长 6 小时内一次都不跑（`lastRunAt` 恒 0），
+   * 用户看到的就是「自动领取无作用」。现在心跳只负责「到点了吗」的判定，
+   * 真正的节流由 `lastRunAt` 与 `intervalMs` 比较完成。
    */
   assert.deepEqual(
     [...intervals].sort((a, b) => a - b),
-    [30 * 60_000, 60 * 60_000],
-    '应注册每小时清理 + 自动领取轮询（默认 30 分钟）',
+    [60_000, 60 * 60_000],
+    '应注册每小时清理 + 每分钟自动领取心跳',
   )
 
   /**

@@ -2,25 +2,60 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { ZcodePlanClient } from '../lib/plan-client.js'
+import { nextUtc8DayStartMs } from '../lib/upstream.js'
 
 const CREDENTIAL = { zcode_jwt: 'jwt-1', device_mid: 'dev-1', user_id: 'u-1' }
 
 /** 内存版账号池（只实现 plan-client 用到的方法）。 */
 function fakePool(credentials = [{ id: 'acct-a', credential: CREDENTIAL }]) {
   const state = credentials.map((entry) => ({ nickname: entry.id, enabled: true, model_rate_limits: {}, ...entry }))
+  /** 进程内零内容观察窗（与真池同语义：软优先，不进 model_rate_limits）。 */
+  const watch = new Map()
   return {
     list: () => state,
     get(id) {
       return state.find((entry) => entry.id === id)
     },
+    /** 与真池一致：限流中的账号×模型被硬过滤（当日级）；观察窗只是软优先不在这判。 */
     pick(model, exclude) {
       const excluded = exclude ?? new Set()
-      const hit = state.find((entry) => entry.enabled && !excluded.has(entry.id))
+      const now = Date.now()
+      const hit = state.find(
+        (entry) =>
+          entry.enabled &&
+          !excluded.has(entry.id) &&
+          !((entry.model_rate_limits[model] ?? 0) > now),
+      )
       return hit === undefined ? null : { entry: hit, credential: hit.credential }
     },
     markModelRateLimited(accountId, modelId, resetAt) {
       const hit = state.find((entry) => entry.id === accountId)
       if (hit !== undefined) hit.model_rate_limits[modelId] = resetAt
+    },
+    /**
+     * 面板「清除限流」的**同一个入口**（3012 风控后 plan-client 会自动调它）。
+     * 与真池（`AccountPool.clearModelRateLimits`）同语义：只清选中项，返回清掉几项。
+     */
+    clearModelRateLimits(accountId, modelIds) {
+      const hit = state.find((entry) => entry.id === accountId)
+      if (hit === undefined) return 0
+      let removed = 0
+      for (const modelId of modelIds ?? Object.keys(hit.model_rate_limits)) {
+        if (Object.prototype.hasOwnProperty.call(hit.model_rate_limits, modelId)) {
+          delete hit.model_rate_limits[modelId]
+          removed += 1
+        }
+      }
+      return removed
+    },
+    noteEmptyContentWatch(accountId, modelId, until) {
+      watch.set(`${accountId}|${modelId}`, until)
+    },
+    isEmptyContentWatched(accountId, modelId) {
+      return (watch.get(`${accountId}|${modelId}`) ?? 0) > Date.now()
+    },
+    clearEmptyContentWatch(accountId, modelId) {
+      watch.delete(`${accountId}|${modelId}`)
     },
     noteError() {},
   }
@@ -138,7 +173,36 @@ test('200 但零内容 → 标记该账号并换号（调用方零 chunk）', as
   const result = await client.call({ options: baseOptions })
   assert.equal(result.accountId, 'acct-b')
   assert.deepEqual(picked, ['acct-a', 'acct-b'])
-  assert.equal(pool.list()[0].model_rate_limits['GLM-5.3-Flash'] > Date.now(), true, 'acct-a 被标记到当日结束')
+  /**
+   * 1.0.1 两级证据：**首次**零内容只打观察窗（pool 软优先，10 分钟自动过期），
+   * 绝不写进 model_rate_limits（那是当日硬过滤表）—— 模型实际可用时一次
+   * 上游抖动不该判死刑。
+   */
+  assert.equal(
+    pool.list()[0].model_rate_limits['GLM-5.3-Flash'] === undefined,
+    true,
+    '首次零内容不落当日硬标记',
+  )
+  assert.equal(pool.isEmptyContentWatched('acct-a', 'GLM-5.3-Flash'), true, '但进观察窗（软优先）')
+})
+
+test('零内容两级证据：观察窗内第二次（跨请求）才升级为当日标记', async () => {
+  const pool = fakePool([{ id: 'acct-a', credential: CREDENTIAL }])
+  const fetchImpl = async () => response(200, emptyStream())
+  const client = new ZcodePlanClient({ pool, minter: fakeMinter(), fetchImpl })
+  /**
+   * 唯一账号场景（最坏情况）：请求 1 零内容（首次）→ 观察窗 + 换号；
+   * 观察窗是软优先，pick 第二档仍会选回 A —— 第二次零内容升级当日。
+   */
+  await assert.rejects(() => client.call({ options: baseOptions }), (error) => error.code === 'QUOTA')
+  assert.equal(
+    pool.list()[0].model_rate_limits['GLM-5.3-Flash'] === undefined,
+    true,
+    '首次零内容不落当日硬标记',
+  )
+  await assert.rejects(() => client.call({ options: baseOptions }), (error) => error.code === 'QUOTA')
+  const mark = pool.list()[0].model_rate_limits['GLM-5.3-Flash']
+  assert.equal(mark, nextUtc8DayStartMs(new Date()), '观察窗内第二次零内容 → 升级为当日标记（= 下一个 UTC+8 零点）')
 })
 
 test('额度用尽（1005）→ 换号；两个号都用尽 → QUOTA 失败', async () => {
@@ -161,7 +225,7 @@ test('额度用尽（1005）→ 换号；两个号都用尽 → QUOTA 失败', a
   assert.equal(pool.list().every((entry) => entry.model_rate_limits['GLM-5.3-Flash'] > Date.now()), true)
 })
 
-test('风控 3012 不重试、不换号，直接失败', async () => {
+test('风控 3012 不重试、不换号，直接失败（独立码 RISK_BLOCKED）', async () => {
   let calls = 0
   const client = new ZcodePlanClient({
     pool: fakePool(),
@@ -174,12 +238,86 @@ test('风控 3012 不重试、不换号，直接失败', async () => {
   await assert.rejects(
     () => client.call({ options: baseOptions }),
     (error) => {
-      assert.equal(error.code, 'RATE_LIMIT')
+      /**
+       * ⚠ 必须是 **RISK_BLOCKED**，不是 RATE_LIMIT（3012 的语义收窄后的契约）：
+       * - RATE_LIMIT 只表示 3009 并发限流（秒级瞬态，可重试可回退）；
+       * - 3012 是账号级风控，重试有累积惩罚（30 分钟 → 24 小时 → 停用），
+       *   宿主要能按码分流出「不许自动重试」。
+       */
+      assert.equal(error.code, 'RISK_BLOCKED')
       assert.match(error.message, /3012/)
+      assert.match(error.message, /风控/, '文案要说清这是风控，不是额度问题')
       return true
     },
   )
   assert.equal(calls, 1, '3012 有冷却惩罚：绝不能连续重试')
+})
+
+test('风控 3012 后**自动清除**该账号×模型的限流标记（不必等用户点面板按钮）', async () => {
+  /**
+   * 3012 常常是一次误判：该账号×模型未必真的耗尽额度，但此前可能已被打过
+   * `model_rate_limits` 硬标记（零内容升级 / 早前的 1005）。若不清掉，用户
+   * 「稍后重试」时会在**选号阶段**就被自己的标记挡住 —— 看起来还像额度问题，
+   * 而真正的原因是风控。
+   */
+  const pool = fakePool([
+    { id: 'acct-a', credential: CREDENTIAL },
+    { id: 'acct-b', credential: { ...CREDENTIAL, user_id: 'u-2' } },
+  ])
+  const MODEL = 'GLM-5.3-Flash'
+  /**
+   * 两个「别人的上游依据」标记：**别的账号**、**别的模型**。
+   * 3012 只允许清「该账号 × 该模型」，这两条必须原样留着。
+   */
+  pool.markModelRateLimited('acct-a', 'GLM-5.3', Date.now() + 3_600_000)
+  pool.markModelRateLimited('acct-b', 'GLM-4.6', Date.now() + 3_600_000)
+  /**
+   * 本次要验的核心：该账号 × 该模型**原本带着当日硬标记**（早前的零内容升级 /
+   * 1005 留下的），随后这一次请求撞上 3012 —— 标记必须被自动清除。
+   *
+   * ⚠ 用**自动选号**（不钉定）而不是钉定：钉定会先按限流把账号拒掉，根本发不出请求。
+   * 这里让选号第一步就把 acct-a 选出来（acct-b 也带标记 → 一并排除），
+   * 于是 3012 分支能走到，清除动作可观测。
+   */
+  pool.pick = (model, exclude) => {
+    const excluded = exclude ?? new Set()
+    const hit = pool.list().find((entry) => entry.enabled && !excluded.has(entry.id))
+    return hit === undefined ? null : { entry: hit, credential: hit.credential }
+  }
+
+  let calls = 0
+  const client = new ZcodePlanClient({
+    pool,
+    minter: fakeMinter(),
+    fetchImpl: async () => {
+      calls += 1
+      return response(403, '{"code":3012,"msg":"unusual activity"}', 'application/json')
+    },
+  })
+
+  await assert.rejects(
+    () => client.call({ options: baseOptions }),
+    (error) => {
+      assert.equal(error.code, 'RISK_BLOCKED')
+      return true
+    },
+  )
+  assert.equal(calls, 1, '清除标记是为了「用户手动重试时不被自己挡住」，不是为了自动再撞一次')
+  assert.equal(
+    pool.list()[0].model_rate_limits[MODEL],
+    undefined,
+    '3012 之后该账号该模型的限流标记必须已被自动清除（本轮核心需求）',
+  )
+  assert.notEqual(
+    pool.list()[0].model_rate_limits['GLM-5.3'],
+    undefined,
+    '只清该模型：同一账号的其它模型标记各有上游依据',
+  )
+  assert.notEqual(
+    pool.list()[1].model_rate_limits['GLM-4.6'],
+    undefined,
+    '只清该账号：别的账号的标记各有上游依据，绝不能顺手清掉',
+  )
 })
 
 test('并发限流 3009 退避重试但不换号', async () => {
@@ -358,7 +496,7 @@ test('账号池为空 → QUOTA 并提示登录命令', async () => {
   )
 })
 
-test('401 凭据失效 → 同账号撞满 2 次后换号；单账号池 → 归为 QUOTA 类终态', async () => {
+test('401 凭据失效 → 同账号撞满 2 次后换号；单账号池 → 终态 AUTH', async () => {
   let calls = 0
   const client = new ZcodePlanClient({
     pool: fakePool(),
@@ -371,9 +509,14 @@ test('401 凭据失效 → 同账号撞满 2 次后换号；单账号池 → 归
   await assert.rejects(
     () => client.call({ options: baseOptions }),
     (error) => {
-      /** 0.9.9 韧性语义：auth 不再当场 throw —— 撞满 2 次换号；单账号池
-       * 选不到下一个号，按最后失败原因（非并发）归 QUOTA 终态。 */
-      assert.equal(error.code, 'QUOTA')
+      /**
+       * 0.9.9 韧性语义：auth 不再当场 throw —— 撞满 2 次换号；单账号池
+       * 选不到下一个号，按**真实失败原因**（auth）归 `AUTH` 终态。
+       *
+       * ⚠ 不再归 QUOTA：凭据失效需要重新登录，等额度重置永远不会解决它；
+       * 报成额度问题会把用户带去错误的排查方向（且 AUTH 不在回退名单里）。
+       */
+      assert.equal(error.code, 'AUTH')
       assert.match(error.message, /凭据失效|1002/)
       return true
     },
@@ -419,10 +562,21 @@ test('0.9.9 韧性：3012 风控仍然绝不重试、绝不换号（冷却惩罚
   await assert.rejects(
     () => client.call({ options: baseOptions }),
     (error) => {
-      assert.equal(error.code, 'RATE_LIMIT')
+      /** 独立码：风控不是并发限流，宿主要能分流出「不许自动重试」。 */
+      assert.equal(error.code, 'RISK_BLOCKED')
       assert.match(error.message, /3012/)
       return true
     },
   )
   assert.equal(calls, 1, '3012 有账号冷却惩罚：一次即停，韧性兜底不覆盖它')
+})
+
+test('3012 的 RISK_BLOCKED 刻意**不在**回退名单里（换通道常常还是同一批账号）', async () => {
+  const { isFallbackWorthyCode } = await import('../lib/errors.js')
+  assert.equal(isFallbackWorthyCode('RISK_BLOCKED'), false, '风控不触发插件回退：冷却惩罚是账号级的')
+  /** 语义收窄后的对照：RATE_LIMIT 只表示 3009 并发限流（瞬态，可回退）。 */
+  assert.equal(isFallbackWorthyCode('RATE_LIMIT'), true)
+  assert.equal(isFallbackWorthyCode('QUOTA'), true)
+  assert.equal(isFallbackWorthyCode('TIMEOUT'), true)
+  assert.equal(isFallbackWorthyCode('AUTH'), false)
 })

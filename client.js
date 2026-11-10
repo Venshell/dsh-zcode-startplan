@@ -118,6 +118,15 @@ window.__ModuleLoader__.load({
       .zsp-restart-guide{display:flex;flex-direction:column;gap:4px;min-width:0}
       .zsp-restart-guide .zsp-plan-id{font-size:12px;line-height:20px;align-self:flex-start;max-width:100%;white-space:pre-wrap;word-break:break-all}
       .zsp-chip[data-limited=true]{color:var(--dsw-alias-label-danger);border-color:var(--dsw-alias-label-danger)}
+      /* 风控痕迹（1.0.2）：橙黄提示，与「额度用尽」的红色刻意区分 —— 风控不是没额度。 */
+      .zsp-chip[data-risk=true]{color:var(--dsw-alias-label-warning,#b8860b);border-color:var(--dsw-alias-label-warning,#b8860b);cursor:pointer;background:transparent;font:inherit;font-size:11px;line-height:16px}
+      .zsp-chip[data-risk=true]:hover{background:var(--dsw-alias-fill-secondary,rgba(127,127,127,.18))}
+      .zsp-chip[data-risk=true]:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
+      .zsp-chip[data-risk=true]:disabled{cursor:default;opacity:.55}
+      .zsp-chip-x{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;margin:0 -3px 0 0;padding:0;border:0;border-radius:999px;background:transparent;color:inherit;font-size:11px;line-height:1;cursor:pointer}
+      .zsp-chip-x:hover{background:var(--dsw-alias-fill-secondary,rgba(127,127,127,.18))}
+      .zsp-chip-x:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
+      .zsp-chip-x:disabled{cursor:default;opacity:.5}
       .zsp-bar{height:6px;border-radius:3px;background:var(--dsw-alias-bg-layer-2);overflow:hidden;width:100%}
       .zsp-bar>span{display:block;height:100%;background:var(--dsw-alias-state-business-primary)}
       /**
@@ -193,6 +202,11 @@ window.__ModuleLoader__.load({
        * 内联样式不会因为 <style> 注入时机而闪一下默认外观。
        */
       .zsp-route:hover{color:var(--dsw-alias-label-primary)}
+      .zsp-route[data-state="exhausted"]{color:var(--dsw-alias-label-danger,#d9534f)}
+      .zsp-route[data-state="exhausted"]:hover{color:var(--dsw-alias-label-danger,#d9534f)}
+      /* 风控痕迹：橙黄而不是红 —— 账号没坏、也不是没额度，只是被上游拦过一次。 */
+      .zsp-route[data-state="risk"]{color:var(--dsw-alias-label-warning,#b8860b)}
+      .zsp-route[data-state="risk"]:hover{color:var(--dsw-alias-label-warning,#b8860b)}
       .zsp-route:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
       @media (max-width: 520px){
         .zsp-head{gap:6px}
@@ -747,20 +761,54 @@ window.__ModuleLoader__.load({
        */
       const probe = useCallback(
         async (id) => {
-          patch(id, { probing: true, error: undefined, results: undefined })
+          patch(id, { probing: true, error: undefined, results: undefined, emptyReason: undefined })
           try {
             /** /claimable 是 GET（id 走 query），不走 POST 版 api() 助手。 */
             const response = await fetch(`${API}/claimable?id=${encodeURIComponent(id)}`)
             const data = await response.json().catch(() => ({}))
             if (!response.ok) throw new Error(typeof data?.error === 'string' ? data.error : `HTTP ${response.status}`)
             const plans = Array.isArray(data.plans) ? data.plans : []
+            /**
+             * 三态（0.11.0）：旧实现把「探测失败」与「确实没有活动」写成同一句话，
+             * 用户无法区分是服务端真没给，还是客户端拿挂了 —— 这正是
+             * 「明明有活动却显示没有」最难排查的那一种。
+             *
+             * - `ok === false` → 探测失败（上游不可达 / 异常），红字；
+             * - `sources.campaign === 0 && sources.records === 0` → 服务端确实没有投放，
+             *   也没有领取记录；
+             * - 其余空结果 → 未知（老版本宿主没带 sources）。
+             */
+            const emptyReason =
+              plans.length > 0
+                ? undefined
+                : data.ok === false
+                  ? 'failed'
+                  : data.sources?.campaign === 0 && data.sources?.records === 0
+                    ? 'none'
+                    : 'unknown'
             patch(id, {
               probing: false,
               plans,
-              ...(plans.length === 0 ? { error: data.error ?? '当前没有探测到可领取的活动' } : {}),
+              sources: data.sources,
+              emptyReason,
+              ...(plans.length === 0
+                ? {
+                    error:
+                      data.ok === false
+                        ? `探测失败：${data.error ?? '上游不可达'}`
+                        : emptyReason === 'none'
+                          ? '服务端此刻没有向你投放活动（投放源与领取记录均为空）'
+                          : '当前没有探测到可领取的活动',
+                  }
+                : {}),
             })
           } catch (caught) {
-            patch(id, { probing: false, plans: [], error: caught instanceof Error ? caught.message : String(caught) })
+            patch(id, {
+              probing: false,
+              plans: [],
+              emptyReason: 'failed',
+              error: caught instanceof Error ? caught.message : String(caught),
+            })
           }
         },
         [],
@@ -783,13 +831,26 @@ window.__ModuleLoader__.load({
               ...(typeof target.campaignId === 'string' ? { campaignId: target.campaignId } : {}),
             })
             patch(id, { loading: false, results: Array.isArray(data.results) ? data.results : [] })
+            /**
+             * ⚠ 必须**重新探测**，不能只改本地快照。
+             *
+             * 旧实现只 `patch` 了 results 并刷新余额：`state[id].plans` 还是领之前
+             * 那份 `claimed:false`，于是按钮永远保持可点（用户报「领完不变灰」）。
+             *
+             * 服务端在领取成功后做两件事：撤投放（deliveries 变空）+ 写字
+             * `billing/balance` 的 plans[]。重新探测能同时反映两者：
+             * claimed 变 true、或整条从列表消失 —— 两种都让按钮失能。
+             */
+            await probe(id)
             /** 领取会改变余额（或生成 pending），刷新面板让进度条同步。 */
             if (typeof onClaimed === 'function') await onClaimed()
           } catch (caught) {
             patch(id, { loading: false, error: caught instanceof Error ? caught.message : String(caught) })
+            /** 失败也探一次：可能在飞请求里其实成功了（幂等 1003），别让 UI 停在旧态。 */
+            void probe(id)
           }
         },
-        [onClaimed, state],
+        [onClaimed, probe, state],
       )
 
       /**
@@ -988,10 +1049,26 @@ window.__ModuleLoader__.load({
                * ⚠ 服务端领取成功后不再投放该活动（deliveries 变空）⇒ 已领账号靠
                * `billing/balance` 的领取记录补显（claimed: true）。一视同仁：
                * 每个账号都显示全部已知活动，只是已领的没有领取按钮。
+               *
+               * ⚠ 刚领到的活动落在 `pending[]`（到期才进 `plans`），路由层已合并并带
+               * `pending: true` / `effectiveAt`。这里要把它显示成「已领取 · 待生效 + 时间」，
+               * 否则用户只会看到一行无名灰字，仍认为「没有活动」。
                */
               const claimable = plans.find((plan) => plan.claimed !== true)
               const planId = claimable?.planId ?? plans[0]?.planId
               const allClaimed = plans.length > 0 && claimable === undefined
+              const pendingPlan = plans.find((plan) => plan.pending === true)
+              const formatWhen = (ms) =>
+                typeof ms === 'number' && Number.isFinite(ms)
+                  ? new Date(ms).toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+                  : undefined
+              /** 三态文案：探测失败 / 已领（待生效）/ 确实没有活动 —— 三者不可混说。 */
+              const emptyHint =
+                slot.emptyReason === 'failed'
+                  ? slot.error
+                  : slot.emptyReason === 'none'
+                    ? '服务端此刻没有向你投放活动（投放源与领取记录均为空）'
+                    : '当前没有探测到可领取的活动'
               return h(
                 'div',
                 { key: account.id, className: 'zsp-row', style: { alignItems: 'flex-start' } },
@@ -1000,18 +1077,30 @@ window.__ModuleLoader__.load({
                   'div',
                   { className: 'zsp-meter', style: { flex: '1 1 auto' } },
                   h('code', { className: 'zsp-plan-id' }, planId ?? '—'),
+                  typeof plans[0]?.name === 'string' && plans[0].name.length > 0
+                    ? h('span', { className: 'zsp-muted' }, plans[0].name)
+                    : null,
+                  typeof plans[0]?.grantUnits === 'number'
+                    ? h('span', { className: 'zsp-muted' }, `+${plans[0].grantUnits.toLocaleString()} ${plans[0].unitType ?? ''}`.trim())
+                    : null,
                   slot.probing === true
                     ? h('span', { className: 'zsp-muted' }, '探测中…')
                     : plans.length > 1
                       ? h('span', { className: 'zsp-muted' }, `等 ${plans.length} 个活动`)
                       : null,
                   allClaimed && slot.loading !== true
-                    ? h('span', { className: 'zsp-muted' }, '已领取')
+                    ? h(
+                        'span',
+                        { className: 'zsp-muted' },
+                        pendingPlan === undefined
+                          ? '已领取'
+                          : `已领取 · 待生效${formatWhen(pendingPlan.effectiveAt) === undefined ? '' : ` ${formatWhen(pendingPlan.effectiveAt)}`}${formatWhen(pendingPlan.expiresAt) === undefined ? '' : ` · ${formatWhen(pendingPlan.expiresAt)} 过期`}`,
+                      )
                     : null,
                   slot.loading === true
                     ? h('span', { className: 'zsp-muted' }, '领取中…（captcha 失败会自动重试一次）')
                     : slot.error !== undefined
-                      ? h('span', { className: 'zsp-error' }, slot.error)
+                      ? h('span', { className: slot.emptyReason === 'failed' ? 'zsp-error' : 'zsp-muted' }, slot.error)
                       : slot.results !== undefined
                         ? h(
                             'span',
@@ -1021,6 +1110,19 @@ window.__ModuleLoader__.load({
                                 /** 忠实回传服务端裁决，不做含糊翻译。 */
                                 if (item.ok === true) {
                                   return `✓ 领取成功${item.alreadyClaimed === true ? '（此前已领过，幂等）' : ''}`
+                                }
+                                /**
+                                 * 风控（3012 → `RISK_BLOCKED`）单独一句（1.0.2）。
+                                 *
+                                 * 这不是普通的「失败了」：宿主在抛出 RISK_BLOCKED 前
+                                 * **已自动清掉**该账号该模型的限流标记（pool.clearModelRateLimits，
+                                 * 见 plan-client 的 risk 分支）—— 也就是说用户此刻就能重试。
+                                 * 把「已自动清除…可立即重试」说出来，否则用户看到红字只会
+                                 * 以为账号坏了、去换号或反复点；而 3012 的冷却惩罚是账号级的
+                                 * （30 分钟 → 24 小时 → 停用），反复重试正是最坏的动作。
+                                 */
+                                if (item.code === 'RISK_BLOCKED') {
+                                  return '⚠ 上游风控拦截（3012，非额度问题）：已自动清除本账号限流标记，可立即重试'
                                 }
                                 const code = item.code !== undefined ? `code ${item.code}` : `HTTP ${item.httpStatus}`
                                 return `✗ ${code}：${item.message ?? item.error ?? '未知原因'}`
@@ -1039,10 +1141,12 @@ window.__ModuleLoader__.load({
                       onClick: () => void claim(account.id),
                       disabled: busy || slot.loading === true || slot.probing === true || claimable === undefined,
                       title: claimable === undefined
-                        ? (allClaimed ? '该账号已领取全部已知活动' : '当前没有探测到可领取的活动')
+                        ? (allClaimed
+                            ? (pendingPlan === undefined ? '该账号已领取全部已知活动' : '该账号已领取该活动，正在待生效期（到点会计入额度）')
+                            : emptyHint)
                         : `领取 ${claimable.planId}`,
                     },
-                    slot.loading === true ? '领取中…' : allClaimed ? '已领取' : '领取',
+                    slot.loading === true ? '领取中…' : allClaimed ? (pendingPlan === undefined ? '已领取' : '已领取 · 待生效') : '领取',
                   ),
                 ),
               )
@@ -1179,11 +1283,23 @@ window.__ModuleLoader__.load({
      * 按钮只有两个：「使用」（置顶，下次请求即用它）与「删除」。
      */
     function AccountCard(props) {
-      const { account, balance, busy, modelListVisible, onToggleModelList, confirmId, setConfirmId, onRemove, onRename } = props
+      const { account, balance, busy, modelListVisible, onToggleModelList, confirmId, setConfirmId, onRemove, onRename, onResetLimit } = props
       /** Host 下发的是 `modelRateLimits` 对象（model → resetAt），摊平成 chips。 */
       const limited = Object.entries(account.modelRateLimits ?? {})
         .map(([model, resetAt]) => ({ model, resetAt }))
         .filter((item) => Number(item.resetAt) > Date.now())
+      /**
+       * 风控痕迹（1.0.2）：`/summary` 的账号视图带 `riskBlocked`（来源 `last_error`
+       * 里是否出现过 3012 / unusual activity，见 manage-routes 的 riskBlockedOf）。
+       *
+       * 为什么值得一条 chip：3012 的惩罚是**账号级冷却**（30 分钟 → 24 小时 →
+       * 停用），而用户从界面上看不出任何区别 —— 他会一直点领取/重试，正是最坏的
+       * 动作。chip 兼作「清除限流」入口：它本身是按钮，点一下清掉本账号全部标记
+       * （含 `last_error`），账号立刻恢复可用。
+       *
+       * 注意与上面 `limited` 并存是**正常**的：风控与额度耗尽可以同时发生。
+       */
+      const riskBlocked = account.riskBlocked === true
       return h(
         'div',
         { className: 'zsp-card', 'data-hidden': modelListVisible === false },
@@ -1204,10 +1320,50 @@ window.__ModuleLoader__.load({
           limited.map((item) =>
             h(
               'span',
-              { key: item.model, className: 'zsp-chip', 'data-limited': 'true' },
+              {
+                key: item.model,
+                className: 'zsp-chip',
+                'data-limited': 'true',
+                title: '该账号在此模型上被上游判为额度用尽（1005/零内容），到达限时间自动解除；若模型实际可用，点 × 立即清除误判',
+              },
               `${item.model} 限额至 ${formatReset(item.resetAt)}`,
+              /** 清除误判（1.0.1）：「零内容两次升级」可能仍冤枉实际可用的模型，
+               * chip 上的 × 是唯一不依赖 CLI 的自救入口。 */
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'zsp-chip-x',
+                  'aria-label': `清除 ${item.model} 的限流标记`,
+                  disabled: busy,
+                  onClick: () => onResetLimit?.(item.model),
+                },
+                '×',
+              ),
             ),
           ),
+          /**
+           * 风控 chip（1.0.2）：**在模型栏这一行**（与限流 chip 同排），点它 = 清掉
+           * 本账号全部限流标记 + `last_error`，账号立刻可重试。
+           *
+           * 文案写「曾触发上游风控」而不是「被风控封禁」：3012 也可能是误判
+           * （用户实测拿到 3012 后同一请求重试即成功），把它说成封禁会让人白白换号。
+           */
+          riskBlocked
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  key: '__risk',
+                  className: 'zsp-chip',
+                  'data-risk': 'true',
+                  disabled: busy,
+                  title: '该账号曾触发上游风控（3012 unusual activity），可点清除限流恢复（清掉本账号全部限流标记与错误文案；风控不是额度问题）',
+                  onClick: () => onResetLimit?.(undefined),
+                },
+                '⚠ 曾触发风控 · 点清除限流恢复',
+              )
+            : null,
           /** 每栏最右侧的开关：负 margin 拉出卡片缩进，与统一行的开关同列。 */
           h(Toggle, {
             checked: modelListVisible === true,
@@ -1596,9 +1752,24 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
+      /**
+       * 选中模型（基础 id）。必须带上：候选筛选（限流/忙）与准入判定都按
+       * 「账号 × 模型」判，不带模型时 `/routing` 只能给出不看模型的结论。
+       */
+      const selectionModel =
+        typeof selection?.model === 'string'
+          ? selection.model
+          : typeof selection?.modelId === 'string'
+            ? selection.modelId
+            : ''
+      const baseModel = selectionModel.includes('@acct:')
+        ? selectionModel.slice(0, selectionModel.indexOf('@acct:'))
+        : selectionModel
+
       const refresh = useCallback(async (signal) => {
         const seq = ++readSeq.current
-        const response = await fetch(`${API}/routing`, {
+        const query = baseModel.length > 0 ? `?model=${encodeURIComponent(baseModel)}` : ''
+        const response = await fetch(`${API}/routing${query}`, {
           credentials: 'same-origin',
           cache: 'no-store',
           headers: { accept: 'application/json' },
@@ -1610,7 +1781,7 @@ window.__ModuleLoader__.load({
         /** 旧响应不覆盖新响应（换号很快时会有并发读）。 */
         if (mounted.current && signal?.aborted !== true && seq === readSeq.current) setRouting(value)
         return value
-      }, [])
+      }, [baseModel])
 
       /** 只在「选中本插件模型」时轮询：别的模型下一次请求不会换号，没必要读。 */
       useEffect(() => {
@@ -1701,11 +1872,61 @@ window.__ModuleLoader__.load({
       const shown = routedAccount ?? pinnedAccount ?? previewAccount
 
       /**
+       * **准入状态**（1.0.1 审计修复）：面板的「有额度」来自上游余额接口的
+       * **所有**已激活桶，对话准入看的是**当前生效**的桶 + 当日硬过滤标记。
+       * 两者可以同时成立 —— 这正是「本地显示额度开启、对话却提示额度耗尽」。
+       * 徽标必须把这一层显式说出来，而不是继续把该账号显示成健康账号。
+       */
+      const quotaOf = (accountId) => {
+        const hit = accountsById.find((entry) => entry.accountId === accountId)
+        return hit?.quota ?? undefined
+      }
+      const shownAccountId = routedAccount !== undefined
+        ? routed.accountId
+        : pinned
+          ? pinnedAccountId
+          : routing?.preview?.accountId
+      const shownQuota = shownAccountId === undefined ? undefined : quotaOf(shownAccountId)
+      /** 已判定耗尽：上游 1005/1113/零内容标记，或缓存里的生效桶已过期。 */
+      const exhausted = shownQuota?.limited === true || shownQuota?.expired === true
+      /** 面板口径说「还有余额」但准入已经拒了 —— 需要显式警告。 */
+      const quotaConflict = exhausted && shownQuota?.available === true
+      const outcome = routed?.outcome
+      const routedExhausted = routed !== undefined && routed.outcome === 'exhausted'
+      /**
+       * 风控痕迹（1.0.2）：`/routing` 的 `quota.riskBlocked`（来源 `last_error` 里
+       * 是否出现过 3012 / unusual activity）。
+       *
+       * 为什么必须在**模型栏**上说：3012 的惩罚是账号级冷却（30 分钟 → 24 小时
+       * → 停用），用户在模型栏那边看到的就是「对话突然失败」，反复重问等于自己
+       * 把冷却攒满。徽标给出「该账号曾触发风控」+「可点清除限流恢复」就够了 ——
+       * 它**不影响** `state` / 取名逻辑（账号仍然可用，`pool.pick` 不看 last_error）。
+       */
+      const riskBlocked = shownQuota?.riskBlocked === true
+
+      /**
        * 只显示账号名，不加「钉定 / 当前账号」前缀 —— 徽标本身就是「当前使用账号」，
        * 再写一遍是冗余；钉定栏位与统一栏位的差别放在 tooltip 里说明。
+       * 例外：准入已拒绝时必须在名字前加 ⚠，否则「显示有额度」的错觉还在。
        */
-      const state = shown === undefined ? (refreshing ? 'loading' : 'idle') : 'live'
-      const label = shown !== undefined ? shown.nickname : refreshing ? '读取中…' : '无可用账号'
+      const state = shown === undefined
+        ? refreshing
+          ? 'loading'
+          : 'idle'
+        : exhausted || routedExhausted
+          ? 'exhausted'
+          : riskBlocked
+            ? 'risk'
+            : 'live'
+      /**
+       * 前缀优先级：**耗尽 > 风控**。耗尽时已经有一个 ⚠，再加一个同类符号只会
+       * 让两个状态混成一句看不懂的「⚠⚠」；风控的说明放在 tooltip 里逐条列出。
+       */
+      const label = shown !== undefined
+        ? `${exhausted || routedExhausted ? '⚠ ' : riskBlocked ? '⚠ ' : ''}${shown.nickname}`
+        : refreshing
+          ? '读取中…'
+          : '无可用账号'
       const tooltip = shown === undefined
         ? '账号池为空：先在插件面板登录添加账号'
         : [
@@ -1717,6 +1938,22 @@ window.__ModuleLoader__.load({
                   ? '该栏位固定使用此账号'
                   : '统一选号：下次请求可能换号',
             shown.modelId.length > 0 ? `上次：${shown.modelId}` : '',
+            exhausted || routedExhausted
+              ? `⚠ 该账号已被上游判定额度用尽${shownQuota?.reason !== undefined ? `（${shownQuota.reason}）` : ''}，下一次对话会直接换号或报错`
+              : '',
+            /**
+             * 风控提示（1.0.2）：说清三件事 —— 是风控不是额度、容易被误判、
+             * 面板里能一键恢复（点账号卡片上的「⚠ 曾触发风控 · 点清除限流恢复」chip）。
+             */
+            riskBlocked
+              ? '⚠ 该账号曾触发上游风控（3012 unusual activity，不是额度问题，可能是误判）：到插件面板点该账号的「点清除限流恢复」即可恢复'
+              : '',
+            quotaConflict
+              ? '面板显示仍有余额：那是已激活但尚未生效的额度包，对话只认当前生效的那一桶'
+              : '',
+            outcome === 'failed' || shownQuota?.source === 'failed'
+              ? '余额接口暂不可用（面板数字可能滞后）'
+              : '',
             '点击立即刷新',
           ].filter(Boolean).join(' · ')
 
@@ -1771,9 +2008,18 @@ window.__ModuleLoader__.load({
         whiteSpace: 'nowrap',
         padding: '0 4px 0 0',
       }
-      /** 换号一闪：同款注释级配色，只改文字色，不加背景/描边。 */
-      const flashStyle = flash
-        ? { color: 'var(--dsw-alias-state-business-primary)' }
+      /**
+       * 换号一闪：同款注释级配色，只改文字色，不加背景/描边。
+       * 风控也上色（1.0.2）：橙黄，低于耗尽的红，高于正常的蓝 —— 三级一眼可分。
+       */
+      const flashStyle = flash || exhausted || routedExhausted || riskBlocked
+        ? {
+            color: exhausted || routedExhausted
+              ? 'var(--dsw-alias-label-danger,#d9534f)'
+              : riskBlocked
+                ? 'var(--dsw-alias-label-warning,#b8860b)'
+                : 'var(--dsw-alias-state-business-primary)',
+          }
         : undefined
 
       /**
@@ -1863,6 +2109,34 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 「清除限流」结果的一句话说明（1.0.2）。
+     *
+     * 旧实现（以及 `act()` 的通用路径）在成功时**什么也不说** —— 用户点 ×
+     * 只看到 chip 消失，不知道清了几条、清的是哪个模型，也不知道错误文案
+     * 同时被清掉了。`/reset-limits` 现在回 `{ removed, clearedModels, lastErrorBefore }`，
+     * 这里把它摊成一句能读的话。
+     *
+     * @param {{ removed?: number, clearedModels?: string[], lastErrorBefore?: string | null }} data
+     * @param {string | undefined} model 点击时指定的模型（undefined = 清该账号全部）
+     */
+    function describeResetLimits(data, model) {
+      const removed = typeof data?.removed === 'number' ? data.removed : 0
+      const cleared = Array.isArray(data?.clearedModels) ? data.clearedModels : []
+      /** 明确「清了哪个模型」：单模型点击时优先用请求里的那个（即使它本来就没标记）。 */
+      const scope = model !== undefined && model.length > 0
+        ? model
+        : cleared.length > 0
+          ? cleared.join('、')
+          : '全部模型'
+      const suffix =
+        typeof data?.lastErrorBefore === 'string' && data.lastErrorBefore.length > 0
+          ? `（原限流原因已清：${data.lastErrorBefore.trim().slice(0, 60)}${data.lastErrorBefore.trim().length > 60 ? '…' : ''}）`
+          : ''
+      if (removed === 0) return `该账号在 ${scope} 上没有限流标记（可能已自动解除）`
+      return `已清除 ${removed} 条限流标记 · ${scope}${suffix}`
+    }
+
+    /**
      * 面板主体。
      *
      * 宿主以两种 view 调用（workbuddy 实证）：
@@ -1874,6 +2148,8 @@ window.__ModuleLoader__.load({
     function Panel(props) {
       const [data, setData] = useState(undefined)
       const [error, setError] = useState(undefined)
+      /** 一次性成功提示（清除限流之类「做完要说一声」的操作，1.0.2）。 */
+      const [notice, setNotice] = useState(undefined)
       const [balances, setBalances] = useState({})
       const [busy, setBusy] = useState(false)
       const [confirmId, setConfirmId] = useState(undefined)
@@ -1951,6 +2227,43 @@ window.__ModuleLoader__.load({
         [load],
       )
 
+      /**
+       * 清除限流（1.0.2）：**不走 `act()`**。
+       *
+       * `act()` 成功时什么都不说，而用户点 × / 点风控 chip 时最想知道的是
+       * 「到底清掉了什么」。`/reset-limits` 现在回
+       * `{ removed, clearedModels, lastErrorBefore }`，这里把它摊成一句话放进
+       * 顶部提示位（`notice`），并保留几秒后自动消失 —— 不占长期版面。
+       *
+       * `model` 省略 = 清该账号全部标记（风控 chip 用这个形态）。
+       */
+      const resetLimit = useCallback(
+        async (account, model) => {
+          setBusy(true)
+          try {
+            const data = await api('/reset-limits', {
+              id: account.id,
+              ...(typeof model === 'string' && model.length > 0 ? { model } : {}),
+            })
+            await load()
+            setError(undefined)
+            setNotice(`${account.nickname}：${describeResetLimits(data, model)}`)
+          } catch (caught) {
+            setError(caught instanceof Error ? caught.message : String(caught))
+          } finally {
+            setBusy(false)
+          }
+        },
+        [load],
+      )
+
+      /** 提示自动消失（成功提示不该永久留在面板上）。 */
+      useEffect(() => {
+        if (notice === undefined) return undefined
+        const handle = setTimeout(() => setNotice(undefined), 6000)
+        return () => clearTimeout(handle)
+      }, [notice])
+
       /** 插件列表页的摘要视图：一行文本，不发起请求。 */
       if ((props || {}).view === 'summary') {
         return '管理 ZCode 赠送免费 plan 的账号池：每账号一个模型栏位（各吃各的额度）、统一选号开关、余额与限流、面板内登录添加账号（bigmodel / z.ai）。'
@@ -1984,6 +2297,8 @@ window.__ModuleLoader__.load({
          */
         h(TotalQuota, { accounts, balances }),
         error !== undefined ? h('p', { className: 'zsp-error' }, error) : null,
+        /** 成功提示（清除限流）：与红色错误分开配色，几秒后自动消失。 */
+        notice !== undefined ? h('p', { className: 'zsp-muted', 'data-notice': 'true' }, `✓ ${notice}`) : null,
         data === undefined && error === undefined ? h('span', { className: 'zsp-muted' }, '加载中…') : null,
         h(AddAccountSection, { busy, onAdded: () => void load() }),
         accounts !== undefined && accounts.length === 0
@@ -2024,6 +2339,13 @@ window.__ModuleLoader__.load({
                   setConfirmId,
                   onRemove: () => void act('/remove', { id: account.id }),
                   onRename: (nickname) => void act('/rename', { id: account.id, nickname }),
+                  /**
+                   * `model` 省略 = 清该账号全部标记（风控 chip 走这个形态）：
+                   * 3012 的痕迹在 `last_error` 里、不在 `modelRateLimits` 表里，
+                   * 全清才能让「点清除限流恢复」真的恢复。具体清了哪几条由后端
+                   * 回在 `clearedModels` 里，这里交给 `resetLimit` 转成提示。
+                   */
+                  onResetLimit: (model) => void resetLimit(account, model),
                 }),
               )
             : null,
