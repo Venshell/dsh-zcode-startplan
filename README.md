@@ -15,6 +15,10 @@
 
 ## 安装
 
+**宿主要求**：DSH desktop **`0.2.1-rc.3` ~ `0.2.1-rc.5`（已实测）**；`peerDependencies`
+的 semver 范围覆盖到 `0.2.2`（含预发布），更高版本原则上兼容——如遇 `0.2.2+`
+行为变化请开 issue。
+
 **插件页（最简单）**：DSH Web UI 插件页 → 安装 → 输入 `dsh-zcode-startplan`。
 
 **npm**：`npm install -g dsh-zcode-startplan`，然后在 DSH 会话里
