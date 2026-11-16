@@ -94,6 +94,28 @@ test('markModelRateLimited 只影响那一对「账号×模型」，且到期后
   assert.notEqual(pool.pick('GLM-5.3-Flash'), null)
 }))
 
+test('last_error：noteError 写入、clearError 清空（issue #6 缺陷 3）', withPool(async (pool) => {
+  const { entry } = pool.add(credential('a'), 'A')
+  pool.noteError(entry.id, '额度用尽（1005 exceed quota limit）')
+  assert.equal(pool.get(entry.id).last_error, '额度用尽（1005 exceed quota limit）')
+
+  /**
+   * 清空后读回必须是 `undefined`（落库 NULL）——`cli status` 用
+   * `last_error !== undefined`（现按真值）判断是否打印「最近错误」，
+   * 面板按「空 = 无错误」渲染。
+   */
+  pool.clearError(entry.id)
+  assert.equal(pool.get(entry.id).last_error, undefined)
+  assert.equal(pool.get(entry.id).last_error ?? null, null)
+}))
+
+test('clearError 对不存在/已删除的账号不抛（patch 幂等返回 false）', withPool(async (pool) => {
+  pool.clearError('no-such-account')
+  const { entry } = pool.add(credential('a'), 'A')
+  pool.remove(entry.id)
+  pool.clearError(entry.id)
+}))
+
 test('忙标记：pick 优先绕开忙账号；全部忙时回落排队', withPool(async (pool) => {
   const a = pool.add(credential('a'), 'A').entry
   const b = pool.add(credential('b'), 'B').entry

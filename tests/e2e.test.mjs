@@ -246,6 +246,23 @@ test('apply：等 llm 出现后注册 adapter + 状态工具，dispose 时收尾
   const dir = mkdtempSync(join(tmpdir(), 'zsp-apply-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
 
+  /**
+   * ⚠ 版本探测必须 stub（issue #6 修复时的连带发现）：`apply()` 挂载时会真发一次
+   * `https://zcode.z.ai/` 首页探测抬高门控下限（`lib/assemble.js`），探测结果写入
+   * **模块级**运行期状态且不影响本测试 —— 但会污染后面按文件序执行的
+   * `upstream.test.mjs`（它断言门控初值 = 编译期常量）。测试进程不许有外呼。
+   */
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    if (typeof url === 'string' && url.startsWith('https://zcode.z.ai')) {
+      return { ok: true, status: 200, text: async () => '<html>stubbed</html>' }
+    }
+    return realFetch(url, init)
+  }
+  t.after(() => {
+    globalThis.fetch = realFetch
+  })
+
   const registered = []
   const tools = []
   const disposers = []

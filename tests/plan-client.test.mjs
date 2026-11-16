@@ -460,6 +460,46 @@ test('3009 成功命中后清忙标记，不再绕开该账号', async () => {
   assert.equal(busy, false, '命中成功 = 账号已空闲，忙标记立即清除')
 })
 
+test('真实命中后清空 last_error（issue #6 缺陷 3：历史错误不再挂在健康账号上）', async () => {
+  const pool = fakePool([{ id: 'acct-a', credential: CREDENTIAL }])
+  const errors = []
+  pool.noteError = (accountId, message) => {
+    errors.push([accountId, message])
+  }
+  let cleared = 0
+  pool.clearError = (accountId) => {
+    cleared += 1
+    assert.equal(accountId, 'acct-a')
+  }
+  const client = new ZcodePlanClient({
+    pool,
+    minter: fakeMinter(),
+    fetchImpl: async () => response(200, textStream()),
+  })
+  const result = await client.call({ options: baseOptions })
+  assert.equal(result.accountId, 'acct-a')
+  assert.equal(cleared, 1, '命中即清 last_error')
+  assert.ok(
+    errors.every(([, message]) => message !== '额度已清'),
+    '清空走独立的 clearError 通道，不是再写一条错误',
+  )
+})
+
+test('失败路径不清 last_error（clearError 只在真实命中后调用）', async () => {
+  const pool = fakePool([{ id: 'acct-a', credential: CREDENTIAL }])
+  let cleared = 0
+  pool.clearError = () => {
+    cleared += 1
+  }
+  const client = new ZcodePlanClient({
+    pool,
+    minter: fakeMinter(),
+    fetchImpl: async () => response(200, '{"code":1005,"msg":"exceed quota limit"}', 'application/json'),
+  })
+  await assert.rejects(() => client.call({ options: baseOptions }), (error) => error.code === 'QUOTA')
+  assert.equal(cleared, 0, '额度用尽时错误文案必须保留给面板/status')
+})
+
 test('钉定账号持续 3009 → RATE_LIMIT 报错，绝不换号', async () => {
   let calls = 0
   const client = new ZcodePlanClient({

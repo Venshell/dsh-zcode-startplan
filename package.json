@@ -52,6 +52,7 @@
     "test": "node scripts/run-tests.mjs",
     "smoke": "node scripts/smoke-install.mjs",
     "verify:compat": "node scripts/verify_compat.mjs",
+    "check:compat": "node scripts/check-compat-rc3.mjs",
     "login": "node bin/cli.mjs login",
     "status": "node bin/cli.mjs status",
     "probe": "node bin/cli.mjs probe"

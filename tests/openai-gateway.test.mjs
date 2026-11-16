@@ -54,9 +54,46 @@ test('toGenerateOptions: system/user/assistant 基本映射', () => {
   })
   assert.equal(options.maxTokens, 1024)
   assert.equal(options.temperature, 0.3)
-  assert.deepEqual(options.messages[0], { role: 'system', content: [{ type: 'text', text: '你是助手' }] })
-  assert.deepEqual(options.messages[1], { role: 'user', content: [{ type: 'text', text: '你好' }] })
-  assert.deepEqual(options.messages[2], { role: 'assistant', content: [{ type: 'text', text: '你好呀' }] })
+  /**
+   * system 消息折叠进 `options.system`（issue #6 第六节顺带修复）：
+   * `buildUpstreamBody` 只认 `options.system`，消息里的 `role:'system'`
+   * 会被它整体过滤 —— 不折叠 = OpenAI 客户端的 system prompt 静默丢失。
+   */
+  assert.equal(options.system, '你是助手')
+  assert.equal(options.messages.some((m) => m.role === 'system'), false, 'system 消息不再留在消息列表里')
+  assert.deepEqual(options.messages[0], { role: 'user', content: [{ type: 'text', text: '你好' }] })
+  assert.deepEqual(options.messages[1], { role: 'assistant', content: [{ type: 'text', text: '你好呀' }] })
+})
+
+test('toGenerateOptions: 多条 system 按序折叠成一段；developer 同等对待', () => {
+  const options = toGenerateOptions({
+    messages: [
+      { role: 'system', content: '第一段' },
+      { role: 'developer', content: '第二段' },
+      { role: 'user', content: 'hi' },
+    ],
+  })
+  assert.equal(options.system, '第一段\n\n第二段')
+  assert.equal(options.messages.length, 1)
+})
+
+test('折叠后的 system 经 buildUpstreamBody 落到上游 system 块尾部（身份块之后）', async () => {
+  /**
+   * 端到端守卫（issue #6 第六节）：官方身份块是 3012 准入判据，结构性注入
+   * 排最前；调用方 system 必须出现在身份块**之后**，而不是被丢掉。
+   */
+  const { buildUpstreamBody } = await import('../lib/anthropic-body.js')
+  const options = toGenerateOptions({
+    model: 'GLM-5.3-Flash',
+    messages: [
+      { role: 'system', content: 'CALLER PERSONA' },
+      { role: 'user', content: 'hi' },
+    ],
+  })
+  const body = buildUpstreamBody({ options, provider: 'zcode-start-plan' })
+  assert.equal(body.system[0].text.startsWith('You are ZCode, an interactive coding agent'), true, '身份块必须打头')
+  assert.equal(body.system.at(-1).text, 'CALLER PERSONA', '调用方 system 追加在最后')
+  assert.equal(body.messages.some((m) => m.role === 'system'), false)
 })
 
 test('toGenerateOptions: 空 messages / 非法 tool_choice 被拒', () => {

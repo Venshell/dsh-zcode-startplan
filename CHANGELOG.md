@@ -3,6 +3,83 @@
 本文件记录**每次修复背后的宿主契约**。只看 diff 看不出「为什么不能改回去」，
 所以把约束与症状一起写下来。
 
+## 未发布 — issue #6 的三个真实缺陷：imageRequestTarget / probe 误报 / last_error 不清
+
+issue #6（0.2.2-rc.3 全链路核对）确认的三个**与宿主版本无关**的缺陷，
+外加两个顺带发现。0.2.2 特有行为变化：无（`peerDependencies` 已覆盖）。
+
+### 缺陷 1：CUA 截图必崩 `TypeError: adapter.imageRequestTarget is not a function`
+
+- **症状**：装了 CUA / 截图类工具、把模型切到 `zcode-start-plan/GLM-5.3-Flash`
+  后，截图动作必崩。纯文本对话不受影响 —— 所以日常用起来完全隐蔽。
+- **根因**：`LlmAdapter.imageRequestTarget` 自 0.2.1-rc.3 起就存在，基类默认实现
+  `{ width, height, maxBytes: image.bytes }`，宿主转发**没有可选调用保护**；
+  唯一调用方是 `@deepseek-ai/dsh-cua`。本插件 `toModelInfo` 对
+  `supportsImage !== false` 的模型默认声明 `['text', 'image']`（兜底表里
+  `GLM-5.3-Flash` 就是 `supportsImage: true`），而两个适配器补齐了
+  `prepareCall` / `imageRequestPricing` 等直调方法，**漏了它**。
+- **修复**：模块级 `imageRequestTargetDefault`（与宿主基类默认实现逐字同形），
+  两个适配器各挂一个方法；顺带补齐 pi-ai 适配器缺的 `resolveModel`
+  （宿主 `resolveModelInfoFor` 同样直调无保护）。
+- **守卫**：新增 `tests/adapter-contract.test.mjs`，锁定宿主直调方法清单。
+
+### 缺陷 2：probe 对 thinking-first 模型恒显示「流里没有文本」
+
+- **症状**：`node bin/cli.mjs probe` 输出「✓ 全链路通过 + 回复：（流里没有文本）」，
+  看着像失败、实际链路通。GLM-5.3-Flash 现在先吐 `thinking` 块，正文可能为空。
+- **修复**：probe 分轨累加 `text_delta` 与 `thinking_delta`，回复行按
+  「正文优先、thinking 兜底（标注「只有 thinking，无正文」）」展示。
+  真实对话不受影响（`sse.js` / `stream-translator.js` 本来就认 thinking）。
+
+### 连带发现（缺陷 2 排查时）：probe 从来只读了 head 段事件
+
+`readContentHead` 的续流解码器在 `result.decoder` 上；probe 原来读
+`result.head.decoder` 恒为 `undefined`（`head` 是已缓冲事件数组，没有该字段），
+超过 head 缓冲的内容从未被收集。已改为读 `result.decoder`。
+
+### 缺陷 3：`last_error` 只写不清，status 输出自相矛盾
+
+- **症状**：账号额度恢复后 `status` 同时输出「剩余 98.7%」与
+  「最近错误：额度用尽（1005）」两行互相打脸的数字；面板红字也一直挂着。
+- **根因**：`pool.noteError` 只写不清，调用点全在失败分支；`reset` 只清
+  `model_rate_limits`。
+- **修复**：新增 `pool.clearError`（落库 **NULL** 而非空串，读回 `undefined`
+  让 status 的真值判断自然不打印）；`plan-client` 在**真实命中**后调用
+  `clearError?.()`。失败路径不动（错误文案必须留给面板/status）。
+  手动「清除限流」入口（`manage-routes`）本就用 `noteError(id, '')` 清文案，两者等价。
+- **测试**：命中即清 / 失败不清 / NULL 读回语义 / 幂等不抛，4 个用例。
+
+### 连带发现（跑全量测试时暴露）：e2e 的版本探测真发外呼，污染 upstream 测试
+
+`apply()` 挂载时探测官方最新版本（`lib/assemble.js`），探测结果写入模块级
+运行期门控且不恢复。官方已发 3.18.2 > 内置常量 3.17.2，于是按文件序执行的
+`upstream.test.mjs` 断言「初值 = 编译期常量」开始随机失败。修复：
+e2e stub 掉 `zcode.z.ai` 的 fetch（测试进程不许有外呼），upstream 门控
+测试开头 `resetGatedMinAppVersion()` 防御顺序变化。
+
+### 顺带：README 宿主要求更新 + `check:compat` 脚本
+
+0.2.2-rc.3 已全链路实测通过（issue #6 报告人的核对结论），README 的
+「已实测」范围更新为 `0.2.1-rc.3 ~ 0.2.2-rc.3`；`scripts/check-compat-rc3.mjs`
+依赖 cwd 下的 `.tmp-dsh-extract-full`（需手动解 asar），登记成
+`npm run check:compat` 并在 README 说明，避免「直接跑就报错」。
+
+### 风控（issue #6 第六节）的两个落点
+
+第六节的实证结论：3012 是**请求形状指纹**问题——同账号同时刻，手写 fetch
+（无身份块）405 + 3012，带 cliPrefix+stable 的 200。已落到两处：
+
+1. **`docs/upstream-protocol.md`** 新增「3012 的消融矩阵与请求形状指纹」小节，
+   记录三级消融表与推论（准入判据必须长在 `buildUpstreamBody` 结构里，
+   任何新上游路径都要过这条组装管线；换号救不了形状不变的 3012）。
+2. **`lib/openai-gateway.js` 的 system 丢弃缺陷**（顺着这条结论排查发现）：
+   `toGenerateOptions` 把 `role:'system'` 映射成消息，而 `buildUpstreamBody`
+   过滤所有消息级 system、只认 `options.system` ⇒ OpenAI 客户端（Codex/Cline 等）
+   的 system prompt 被静默丢弃。准入不受影响（身份块是结构性注入的），但
+   「模型完全不遵循客户端人设」的根源就是它。现在多条 system/developer 消息
+   按序折叠进 `options.system`，经 `buildZcodeSystemBlocks` 追加在官方身份块之后。
+   （pi-ai 的 `local-endpoint` 路径本来就保留 `body.system`，无此问题。）
+
 ## 未发布 — 活动列表为空：版本门控动态化 + 领取链路三处修复
 
 完整排查记录见 [`docs/claim-forensics-2026-11.md`](docs/claim-forensics-2026-11.md)。

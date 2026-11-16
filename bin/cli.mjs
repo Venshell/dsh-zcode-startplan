@@ -118,7 +118,8 @@ function printAccounts(pool) {
       `jwt=${maskJwt(entry.credential?.zcode_jwt)}  ` +
       `device=${entry.credential?.device_mid?.slice(0, 8) ?? '?'}  ` +
       `${limits.length > 0 ? `限流:${limits.join(',')}` : ''}` +
-      `${entry.last_error !== undefined ? `  最近错误:${entry.last_error}` : ''}`,
+      /** last_error 可为 NULL（读回 undefined）或空串（手动清除限流入口写入）：两者都视为「没有错误」。 */
+      `${entry.last_error ? `  最近错误:${entry.last_error}` : ''}`,
     )
   })
   return entries
@@ -289,21 +290,39 @@ async function cmdProbe() {
       maxTokens: 64,
       onRetry: (info) => warn(`重试（${info.reason}）：${info.message}`),
     })
+    /**
+     * 收集可读输出（issue #6 缺陷 2）：GLM-5.3-Flash 是 thinking-first ——
+     * 流的开头常是 `thinking` 块的 `thinking_delta`，正文 `text_delta` 可能为空
+     * 甚至没有。只累加 `text_delta` 会把成功链路显示成「流里没有文本」的误报。
+     * 这里 thinking 与正文分轨累加，回复行按「正文优先、thinking 兜底」展示。
+     */
     let text = ''
-    for (const event of result.head) {
-      const data = event.data
-      if (data?.type === 'content_block_delta' && data.delta?.type === 'text_delta') text += data.delta.text
+    let thinking = ''
+    const collectDelta = (data) => {
+      if (data?.type !== 'content_block_delta') return
+      if (data.delta?.type === 'text_delta') text += data.delta.text
+      else if (data.delta?.type === 'thinking_delta') thinking += data.delta.thinking ?? ''
     }
-    if (result.head.decoder !== undefined) {
+    for (const event of result.head) {
+      collectDelta(event.data)
+    }
+    /**
+     * ⚠ 续流在 `result.decoder`（`readContentHead` 的返回字段），不在 `result.head` 上
+     * —— `head` 是已缓冲的事件数组，从来没有 decoder 字段。旧代码读
+     * `result.head.decoder` 恒为 undefined，导致 probe 实际上只读了 head 段。
+     */
+    if (result.decoder !== undefined) {
       for (;;) {
-        const next = await result.head.decoder.read()
+        const next = await result.decoder.read()
         if (next.done === true) break
-        const data = next.value.data
-        if (data?.type === 'content_block_delta' && data.delta?.type === 'text_delta') text += data.delta.text
+        collectDelta(next.value.data)
       }
     }
     log(`✓ 全链路通过（账号 ${result.accountId.slice(0, 8)}，${Date.now() - started}ms）`)
-    log(`  回复：${text.trim().slice(0, 200) || '（流里没有文本）'}`)
+    const reply = text.trim().length > 0
+      ? text.trim()
+      : thinking.trim().length > 0 ? `（只有 thinking，无正文）${thinking.trim()}` : '（流里没有文本）'
+    log(`  回复：${reply.slice(0, 200)}`)
   } catch (error) {
     warn(`✗ 失败（${error?.code ?? 'ERR'}）：${error instanceof Error ? error.message : String(error)}`)
     process.exitCode = 1

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { buildZcodeHeaders, compareZcodeAppVersion, nextUtc8DayStartMs, toEpochMs, zcodeVersionGatedAppVersion, ZCODE_VERSION_GATED_MIN_APP_VERSION } from '../lib/upstream.js'
+import { buildZcodeHeaders, compareZcodeAppVersion, nextUtc8DayStartMs, resetGatedMinAppVersion, toEpochMs, zcodeVersionGatedAppVersion, ZCODE_VERSION_GATED_MIN_APP_VERSION } from '../lib/upstream.js'
 import {
   classifyUpstreamError,
   concurrencyRetryDelayMs,
@@ -295,6 +295,12 @@ test('fetchBalance: 单桶时行为不变（buckets 仍下发，面板走汇总�
 // ── 版本门控（服务端会随官方版本抬高下限，见 upstream.js 的观测表）──
 
 test('版本门控: marketing/claim 的 app_version 与下限取较大者', () => {
+  /**
+   * 防御顺序污染（issue #6 修复时暴露）：任何早于本文件的测试若真发了
+   * 版本探测（e2e 的 `apply()` 不 stub 就会），运行期门控会被抬高且跨文件
+   * 存活 —— 断言「初值 = 编译期常量」前必须先复位。
+   */
+  resetGatedMinAppVersion()
   /** 凭据旧版本 → 抬到门控下限（低版本投放恒空、claim 1004）。 */
   assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.14.3' }), ZCODE_VERSION_GATED_MIN_APP_VERSION)
   assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.16.2' }), ZCODE_VERSION_GATED_MIN_APP_VERSION)
