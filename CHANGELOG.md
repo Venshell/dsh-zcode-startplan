@@ -3,7 +3,7 @@
 本文件记录**每次修复背后的宿主契约**。只看 diff 看不出「为什么不能改回去」，
 所以把约束与症状一起写下来。
 
-## 未发布 — issue #6 的三个真实缺陷：imageRequestTarget / probe 误报 / last_error 不清
+## 1.0.4 — issue #6 的三个真实缺陷：imageRequestTarget / probe 误报 / last_error 不清
 
 issue #6（0.2.2-rc.3 全链路核对）确认的三个**与宿主版本无关**的缺陷，
 外加两个顺带发现。0.2.2 特有行为变化：无（`peerDependencies` 已覆盖）。
