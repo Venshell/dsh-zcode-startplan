@@ -45,7 +45,7 @@
     "LICENSE"
   ],
   "bin": {
-    "zcode-start-plan": "./bin/cli.mjs"
+    "zcode-start-plan": "bin/cli.mjs"
   },
   "scripts": {
     "check": "node --check index.js && node --check bin/cli.mjs",
