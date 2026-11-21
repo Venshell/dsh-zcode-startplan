@@ -6,6 +6,7 @@ import {
   OFFICIAL_STABLE_SECTIONS,
   buildUpstreamBody,
   buildZcodeSystemBlocks,
+  clampSystemBlocks,
   convertContent,
   convertTools,
   imageBlockFromAttachment,
@@ -16,13 +17,25 @@ import {
 
 const userMessage = (text) => ({ role: 'user', content: [{ type: 'text', text }] })
 
-test('身份块必须打头（3012 的准入判据）', () => {
+test('身份块必须打头；尾块合并 stable / Environment / caller（issue #7 的 2 块结构）', () => {
   const blocks = buildZcodeSystemBlocks('CALLER SYSTEM', { cwd: 'C:/w' })
+  /** 上游 system 数组硬上限 3 块（issue #7）：宿主 fetch 链上的第三方包装器
+   * （billion-context 等）可能在 #fetchImpl 之后追加自己的 system —— 这里只发
+   * 2 块，给包装器留 1 块余量。 */
+  assert.equal(blocks.length, 2)
   assert.equal(blocks[0].text, OFFICIAL_CLI_PREFIX)
-  assert.equal(blocks[1].text, OFFICIAL_STABLE_SECTIONS.join('\n\n'))
-  assert.match(blocks[2].text, /# Environment/)
-  /** 调用方内容追加在最后 —— 前置会顶掉官方前缀结构。 */
-  assert.equal(blocks[blocks.length - 1].text, 'CALLER SYSTEM')
+  assert.equal(blocks[0].cache_control, undefined, 'cache_control 只在最后一块')
+  assert.ok(blocks[1].text.includes(OFFICIAL_STABLE_SECTIONS.join('\n\n')), 'stable 段进尾块')
+  assert.match(blocks[1].text, /# Environment/, 'Environment 段进尾块')
+  assert.ok(blocks[1].text.endsWith('CALLER SYSTEM'), 'caller system 仍在最后')
+  assert.equal(blocks[1].cache_control.type, 'ephemeral')
+})
+
+test('无调用方 system 时同样是 2 块，尾块以 Environment 收尾', () => {
+  const blocks = buildZcodeSystemBlocks(undefined, { cwd: 'C:/w' })
+  assert.equal(blocks.length, 2)
+  assert.equal(blocks[0].text, OFFICIAL_CLI_PREFIX)
+  assert.match(blocks[1].text, /# Environment/)
 })
 
 test('只在最后一块打 cache_control（单请求最多 4 个断点）', () => {
@@ -30,6 +43,36 @@ test('只在最后一块打 cache_control（单请求最多 4 个断点）', () 
   const withCache = blocks.filter((block) => block.cache_control !== undefined)
   assert.equal(withCache.length, 1)
   assert.equal(blocks[blocks.length - 1].cache_control.type, 'ephemeral')
+})
+
+test('clampSystemBlocks: ≤3 块原样返回（同引用，零拷贝热路径）', () => {
+  const three = [
+    { type: 'text', text: 'a' },
+    { type: 'text', text: 'b', cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: 'c' },
+  ]
+  assert.equal(clampSystemBlocks(three), three)
+  assert.equal(clampSystemBlocks(undefined), undefined)
+})
+
+test('clampSystemBlocks: 4 块裁到 3 块，溢出并入最后一块且保留 cache_control（issue #7）', () => {
+  const blocks = clampSystemBlocks([
+    { type: 'text', text: 'cliPrefix' },
+    { type: 'text', text: 'stable' },
+    { type: 'text', text: 'env' },
+    { type: 'text', text: 'caller', cache_control: { type: 'ephemeral' } },
+  ])
+  assert.equal(blocks.length, 3)
+  assert.deepEqual(blocks.map((block) => block.text), ['cliPrefix', 'stable', 'env\n\ncaller'])
+  assert.deepEqual(blocks[2].cache_control, { type: 'ephemeral' }, '断点跟最后一块走')
+})
+
+test('clampSystemBlocks: 任意多的溢出块都并入最后一块', () => {
+  const blocks = clampSystemBlocks(
+    Array.from({ length: 6 }, (_, index) => ({ type: 'text', text: `b${index}` })),
+  )
+  assert.equal(blocks.length, 3)
+  assert.equal(blocks[2].text, 'b2\n\nb3\n\nb4\n\nb5')
 })
 
 test('首轮 user 消息插入日期块，且幂等', () => {

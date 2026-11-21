@@ -3,6 +3,37 @@
 本文件记录**每次修复背后的宿主契约**。只看 diff 看不出「为什么不能改回去」，
 所以把约束与症状一起写下来。
 
+## 1.0.5 — issue #7：system 块数超 3 即 3012，改发 2 块给外部 fetch 包装器留余量
+
+### 根因（报告者实测，issue #7）
+
+上游对 `system` **数组长度**有硬上限 **3 块**：第 4 块无论内容必 `405 + 3012`。
+插件原发 3 块（cliPrefix / stable / `# Environment` + caller 追加）直连 200，
+但若 profile 里同时装了包装 `globalThis.fetch` 的插件（实测元凶
+billion-context 0.1.216，对 `/messages` 注入一段「Compression Philosophy」system），
+转发时被追加一块 → 4 块 → 必然 3012。**插件侧日志全是正常的** —— 它记录的是
+交给 `#fetchImpl` 的字节，包装器在这之后运行；`bin/cli.mjs probe` 也不经过宿主
+fetch 链，probe 通 ≠ 宿主对话通。所以「身份块齐全、日志正常、上游却 3012」
+这第三种触发方式（前两种见 issue #6 / #5）此前极难排查。
+
+### 修复
+
+- `buildZcodeSystemBlocks` 改为**只发 2 块**：block[0] = cliPrefix（独占，
+  准入判据是「以身份块开头」），block[1] = stable + `# Environment` + caller
+  system `\n\n` 合并。2 块直连 200；被包装器追加 1 块后正好 3 块，仍 200。
+- 新增 `clampSystemBlocks`（`MAX_SYSTEM_BLOCKS = 3`）在 `buildUpstreamBody`
+  出口兜底：超过 3 块时把溢出并入最后一块（cache_control 跟最后一块走）。
+  防御调用方拿到 body 后自行追加块的路径。
+- 文档 `docs/upstream-protocol.md`：消融矩阵补「4 块 → 3012」「2 块 → 200」
+  两行，新增「第三方 fetch 包装器会让发出去的 ≠ 日志里的」一节。
+
+### ⚠ 不要改回去
+
+看似「更官方」的 3 块形态（stable / Environment / caller 各一块）在没有包装器时
+也 200，但它把余量用满 —— 任何 fetch 包装插件都会把请求推过上限，且插件侧
+无任何可见症状。2 块不是风格选择，是给宿主 fetch 链上不可控的第三方留的余量。
+报 3012 时若插件日志显示 3 块以内，先查有没有包装 `globalThis.fetch` 的插件。
+
 ## 1.0.4 — issue #6 的三个真实缺陷：imageRequestTarget / probe 误报 / last_error 不清
 
 issue #6（0.2.2-rc.3 全链路核对）确认的三个**与宿主版本无关**的缺陷，

@@ -7,7 +7,9 @@ README 只留清单，本文记录每条的**症状、机制与本插件的处�
 
 | 现象 | 后果 | 本插件的处理 |
 |---|---|---|
-| `system` 不以**官方身份块**开头 | `3012 unusual activity`，**有账号冷却惩罚**（30 分钟；24h 内第 3 次起 24 小时；5 次停用） | `lib/anthropic-body.js` 逐字复刻 cliPrefix + stable 段，调用方 system 追加在最后 |
+| `system` 不以**官方身份块**开头 | `3012 unusual activity`，**有账号冷却惩罚**（30 分钟；24h 内第 3 次起 24 小时；5 次停用） | `lib/anthropic-body.js` 逐字复刻 cliPrefix + stable 段，调用方 system 并入尾块（仍在身份块之后） |
+| `system` **数组超过 3 块**（issue #7 实测） | 同上（`405 + 3012`），第 4 块无论内容必挂 | 只发 **2 块**（cliPrefix / 合并尾块）给外部包装器留 1 块余量；`clampSystemBlocks` 在 `buildUpstreamBody` 出口兜底裁剪 |
+| `system` 传单个长字符串而非块数组 | 同上（3012） | 始终发块数组 |
 | 首轮 user 消息缺 `<system-reminder>` 日期块 | 同上（3012） | 幂等插入到**内容数组**最前面 |
 
 身份块文本出处：开源 [ZCode](https://github.com/zai-org/ZCode) 的
@@ -24,6 +26,8 @@ README 只留清单，本文记录每条的**症状、机制与本插件的处�
 | 无 system / 手写 fetch（无身份块） | `405 + 3012 unusual activity`（响应头带阿里云 ESA 风控 cookie） |
 | 只有 cliPrefix（`You are ZCode…` 42 字符） | 3012 |
 | cliPrefix + stable 段 | 200，全链路通过 |
+| **4 块（任意第 4 块，issue #7 实测）** | `405 + 3012` ← 上游对 system 数组长度的硬上限是 3 |
+| 2 块（issue #7 修后形态） | 200 |
 
 结论：**3012 首先是请求形状指纹问题，不只是账号/频率问题**——风控在请求体里
 找的是「官方客户端的结构性特征」（身份块结构 + 日期块 + tools 断点这套组合），
@@ -36,6 +40,16 @@ README 只留清单，本文记录每条的**症状、机制与本插件的处�
 因此准入判据**必须**长在 `buildUpstreamBody` 的结构里（而不是调用方自觉传入），
 任何新的上游请求路径都要过这条组装管线；`buildZcodeSystemBlocks` 之后追加的
 caller system 只是内容、不改变准入结构。
+
+### ⚠ 第三方 fetch 包装器会让「发出去的」≠「插件日志里的」（issue #7）
+
+**插件自身的日志只反映 `#fetchImpl` 之前的字节**；若宿主安装了包装
+`globalThis.fetch` 的插件（上下文管理、代理、遥测类，实测元凶
+billion-context 0.1.216 会对 `/messages` 注入自己的 system 块），转发后的
+body 可能与插件发出的不同——此时插件侧所有日志都正常，上游却 3012，极难排查。
+这就是 `buildZcodeSystemBlocks` 只发 2 块（而非看似更「官方」的 3 块）的原因：
+给包装器留 1 块余量（2+1=3 通过；3+1=4 必挂）。同理 `bin/cli.mjs probe`
+不经过宿主 fetch 链，probe 通 ≠ 宿主对话通。
 
 ## captcha 时序
 

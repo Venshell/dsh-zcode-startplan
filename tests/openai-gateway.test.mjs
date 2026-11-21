@@ -77,10 +77,12 @@ test('toGenerateOptions: 多条 system 按序折叠成一段；developer 同等�
   assert.equal(options.messages.length, 1)
 })
 
-test('折叠后的 system 经 buildUpstreamBody 落到上游 system 块尾部（身份块之后）', async () => {
+test('折叠后的 system 经 buildUpstreamBody 落到上游 system 尾块（身份块之后，issue #7 的 2 块形态）', async () => {
   /**
-   * 端到端守卫（issue #6 第六节）：官方身份块是 3012 准入判据，结构性注入
-   * 排最前；调用方 system 必须出现在身份块**之后**，而不是被丢掉。
+   * 端到端守卫（issue #6 第六节 + issue #7）：官方身份块是 3012 准入判据，结构性
+   * 注入排最前；调用方 system 必须出现在身份块**之后**，而不是被丢掉。
+   * issue #7：上游 system 数组硬上限 3 块，插件只发 2 块 —— caller 内容与
+   * stable / Environment 合并进尾块，但仍在身份块之后。
    */
   const { buildUpstreamBody } = await import('../lib/anthropic-body.js')
   const options = toGenerateOptions({
@@ -92,7 +94,8 @@ test('折叠后的 system 经 buildUpstreamBody 落到上游 system 块尾部（
   })
   const body = buildUpstreamBody({ options, provider: 'zcode-start-plan' })
   assert.equal(body.system[0].text.startsWith('You are ZCode, an interactive coding agent'), true, '身份块必须打头')
-  assert.equal(body.system.at(-1).text, 'CALLER PERSONA', '调用方 system 追加在最后')
+  assert.equal(body.system.length, 2, 'issue #7：只发 2 块，给第三方 fetch 包装器留余量')
+  assert.ok(body.system.at(-1).text.endsWith('CALLER PERSONA'), '调用方 system 并入尾块且仍在最后')
   assert.equal(body.messages.some((m) => m.role === 'system'), false)
 })
 
