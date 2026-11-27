@@ -193,14 +193,17 @@ test('零内容两级证据：观察窗内第二次（跨请求）才升级为�
   /**
    * 唯一账号场景（最坏情况）：请求 1 零内容（首次）→ 观察窗 + 换号；
    * 观察窗是软优先，pick 第二档仍会选回 A —— 第二次零内容升级当日。
+   *
+   * ⚠ 终态码必须是 **TIMEOUT** 而不是 QUOTA（issue #9）：零内容不证明额度
+   * 用尽，归 QUOTA 会被宿主硬编码成「当前请求的额度已用尽」，而面板余额是满的。
    */
-  await assert.rejects(() => client.call({ options: baseOptions }), (error) => error.code === 'QUOTA')
+  await assert.rejects(() => client.call({ options: baseOptions }), (error) => error.code === 'TIMEOUT')
   assert.equal(
     pool.list()[0].model_rate_limits['GLM-5.3-Flash'] === undefined,
     true,
     '首次零内容不落当日硬标记',
   )
-  await assert.rejects(() => client.call({ options: baseOptions }), (error) => error.code === 'QUOTA')
+  await assert.rejects(() => client.call({ options: baseOptions }), (error) => error.code === 'TIMEOUT')
   const mark = pool.list()[0].model_rate_limits['GLM-5.3-Flash']
   assert.equal(mark, nextUtc8DayStartMs(new Date()), '观察窗内第二次零内容 → 升级为当日标记（= 下一个 UTC+8 零点）')
 })

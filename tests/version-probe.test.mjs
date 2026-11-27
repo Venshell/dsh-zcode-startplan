@@ -38,7 +38,7 @@ test('extractLatestVersion: 取**最高**版本（不是首个/末个）', () =>
   const html = htmlWith('3.17.2', '3.14.3', '3.16.3', '3.9.10')
   assert.equal(extractLatestVersion(html), '3.17.2')
   /** 乱序、含重复：仍取最大，且不去重也不影响结果。 */
-  assert.equal(extractLatestVersion(htmlWith('3.18.0', '3.17.2', '3.18.0')), '3.18.0')
+  assert.equal(extractLatestVersion(htmlWith('3.20.0', '3.17.2', '3.20.0')), '3.20.0')
   /** 段数不同时按缺失补 0 比较（3.10.0 > 3.9.9）。 */
   assert.equal(extractLatestVersion(htmlWith('3.9.9', '3.10.0')), '3.10.0')
   /** 主版本进位（10.0.0 > 9.99.99 而不是字符串比较）。 */
@@ -110,10 +110,10 @@ test('fetchLatestClientVersion: 失败一律返回 undefined（绝不抛，绝�
   let calls = 0
   const recover = async () => {
     calls += 1
-    return calls === 1 ? { ok: false, status: 500, text: async () => '' } : { ok: true, status: 200, text: async () => htmlWith('3.18.0') }
+    return calls === 1 ? { ok: false, status: 500, text: async () => '' } : { ok: true, status: 200, text: async () => htmlWith('3.20.0') }
   }
   assert.equal(await fetchLatestClientVersion({ fetchImpl: recover }), undefined)
-  assert.equal(await fetchLatestClientVersion({ fetchImpl: recover }), '3.18.0', '失败不缓存，下一次能自愈')
+  assert.equal(await fetchLatestClientVersion({ fetchImpl: recover }), '3.20.0', '失败不缓存，下一次能自愈')
   resetVersionCache()
 })
 
@@ -123,19 +123,19 @@ test('setGatedMinAppVersion: 只**抬高**不降低', () => {
   assert.equal(currentGatedMinAppVersion(), base, '初值 = 编译期常量')
 
   /** 抬高：生效。 */
-  assert.equal(setGatedMinAppVersion('3.18.0'), '3.18.0')
-  assert.equal(currentGatedMinAppVersion(), '3.18.0')
+  assert.equal(setGatedMinAppVersion('3.20.0'), '3.20.0')
+  assert.equal(currentGatedMinAppVersion(), '3.20.0')
 
   /** 更低的版本：忽略（降低会让服务端门控重新失效，等于退化）。 */
-  assert.equal(setGatedMinAppVersion('3.16.3'), '3.18.0', '探到更旧的版本绝不能把下限拉低')
-  assert.equal(currentGatedMinAppVersion(), '3.18.0')
+  assert.equal(setGatedMinAppVersion('3.18.0'), '3.20.0', '探到更旧的版本绝不能把下限拉低')
+  assert.equal(currentGatedMinAppVersion(), '3.20.0')
 
   /** 相等：保持。 */
-  assert.equal(setGatedMinAppVersion('3.18.0'), '3.18.0')
+  assert.equal(setGatedMinAppVersion('3.20.0'), '3.20.0')
 
   /** undefined / 空串 / 脏值：忽略（脏值会原样进 User-Agent，`Headers()` 对脏值抛 TypeError）。 */
-  for (const dirty of [undefined, null, '', '   ', 'latest', '3.18', '3.18.0-beta.1', '3.18.0\r\nX-Injected: 1', '03.18.0', 3.18]) {
-    assert.equal(setGatedMinAppVersion(dirty), '3.18.0', `脏值 ${JSON.stringify(dirty)} 必须被忽略`)
+  for (const dirty of [undefined, null, '', '   ', 'latest', '3.20', '3.20.0-beta.1', '3.20.0\r\nX-Injected: 1', '03.20.0', 3.18]) {
+    assert.equal(setGatedMinAppVersion(dirty), '3.20.0', `脏值 ${JSON.stringify(dirty)} 必须被忽略`)
   }
 
   /** 再抬一档：继续生效（单调递增是唯一允许的移动方向）。 */
