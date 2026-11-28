@@ -66,7 +66,7 @@
   "dsh": {
     "id": "dsh-zcode-startplan",
     "name": "ZCode Start Plan",
-    "version": "1.0.1",
+    "version": "1.0.6",
     "permissions": "模型供应商接入, 账号池管理",
     "bundle": {
       "patch": "./cordis.patch.yml"

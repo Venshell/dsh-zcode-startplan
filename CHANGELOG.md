@@ -3,6 +3,59 @@
 本文件记录**每次修复背后的宿主契约**。只看 diff 看不出「为什么不能改回去」，
 所以把约束与症状一起写下来。
 
+## 1.0.6 — issue #9 / PR #10：推理端点版本闸门（静默确认）被误判成额度用尽
+
+### 根因（抓包消融，230 会话 / 522 文件）
+
+上游对推理端点有**两道独立闸门**，必须同时满足才真正处理请求：
+
+```
+闸门 1  版本   x-zcode-app-version ≥ 3.19.0
+        3.14.3 / 3.18.2 → HTTP 200 + 恰好 64 字节 {"code":0,"msg":"","logid":"…"}
+                          （静默确认：收下请求、回 code:0、什么都不做）
+        3.19.0 / 4.0.0  → 200 text/event-stream
+
+闸门 2  身份   system 首块逐字节等于当前官方原文
+        [S0,S1] 200 / [S0,S1+尾巴] 200
+        少 1 尾字符、中间改 1 字符、前置垃圾 → 405 + 3012
+```
+
+1.0.5 同时踩中两道：身份文案是旧版 **42** 字符
+`"You are ZCode, an interactive coding agent"`，推理版本又固定 `3.14.3`
+（正好落在静默丢弃区间）。于是每次对话都「200 但零内容」，再被「零内容」
+启发式两次升级成当日硬标记 → 用户看到「当前请求的额度已用尽」，
+而账单 `available_units` 是满的。
+
+旧结论「推理路径 3.14.3 可用」是在**没有官方 system 块**时取的 —— 那时
+`3012` 掩盖了版本闸门，所以只看到「版本低也能过」。
+
+### 修复
+
+- `anthropic-body.js`：首块改官方 35 字符
+  `"You are ZCode, an interactive agent"`，稳定段换官方 1229 字符原文。
+- `upstream.js`：`ZCODE_VERSION_GATED_MIN_APP_VERSION` `3.17.2` → `3.19.0`。
+- `plan-client.js`：推理请求传 `appVersion: zcodeVersionGatedAppVersion(credential)`；
+  新增 `silentDrop` 短路 —— **不打额度标记、不换号**（换号同样静默），
+  直接抛 `PROVIDER_ERROR` 并指明是版本/身份闸门。
+- `sse.js`：新增 `isSilentAck()`，把 64 字节静默确认从「零内容」里分离。
+- `plan-client.js`：零内容分支补 `lastSwitchReason = 'timeout'`（issue #9）。
+  该分支此前**从不赋值**，终态落到 `lastSwitchReason === 'none'` → `quota`，
+  被宿主硬编码成「当前请求的额度已用尽」。
+
+### ⚠ 不要改回去
+
+- **不要把版本下限调低。** 低版本不是「兼容性更好」，是**必然静默丢弃**。
+- **不要「放宽」身份块匹配**（比如只检查前缀、允许近似）。实测少 1 个字符
+  就 405，判据是逐字节。
+- **不要把 `silentDrop` 并回零内容分支。** 静默确认不是额度问题，一旦走
+  观察窗/当日标记，面板余额与对话结论会永远矛盾 —— 那正是这个 bug 的形态。
+- 身份文本会随官方版本演进（3.x → 4.0.0 已变）。`assemble.js` 挂载时会
+  用 `fetchLatestClientVersion()` 把版本下限抬到官方最新，但**身份文本需要
+  人工同步**；官方发版后若突然大面积 3012，先比对首块原文。
+- 顺带确认（别再花时间试）：请求头不是闸门（`x-zcode-query-source`、
+  `anthropic-beta`、`metadata.user_id`、TLS 指纹都无关）；`cache_control`
+  加在官方块上不影响闸门。
+
 ## 1.0.5 — issue #7：system 块数超 3 即 3012，改发 2 块给外部 fetch 包装器留余量
 
 ### 根因（报告者实测，issue #7）
