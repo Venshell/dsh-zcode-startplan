@@ -93,7 +93,7 @@ test('折叠后的 system 经 buildUpstreamBody 落到上游 system 尾块（身
     ],
   })
   const body = buildUpstreamBody({ options, provider: 'zcode-start-plan' })
-  assert.equal(body.system[0].text.startsWith('You are ZCode, an interactive coding agent'), true, '身份块必须打头')
+  assert.equal(body.system[0].text.startsWith('You are ZCode, an interactive agent'), true, '身份块必须打头')
   assert.equal(body.system.length, 2, 'issue #7：只发 2 块，给第三方 fetch 包装器留余量')
   assert.ok(body.system.at(-1).text.endsWith('CALLER PERSONA'), '调用方 system 并入尾块且仍在最后')
   assert.equal(body.messages.some((m) => m.role === 'system'), false)

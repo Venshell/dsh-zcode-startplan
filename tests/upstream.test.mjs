@@ -304,11 +304,16 @@ test('版本门控: marketing/claim 的 app_version 与下限取较大者', () =
   /** 凭据旧版本 → 抬到门控下限（低版本投放恒空、claim 1004）。 */
   assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.14.3' }), ZCODE_VERSION_GATED_MIN_APP_VERSION)
   assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.16.2' }), ZCODE_VERSION_GATED_MIN_APP_VERSION)
-  /** 2026-11-10 实测：3.16.3 已被服务端判为「旧」（deliveries 恒空），必须抬到 3.17.2。 */
+  /**
+   * 2026-11-28 抓包消融（zcode_解析结果）修正了 1.0.5 及以前的结论：
+   * 推理端点同样按版本门控 —— 3.18.2 及以下返回 200 + 64 字节静默空体，
+   * 3.19.0 起才是真实 SSE。旧值 3.17.2 是在「没有官方 system 块」的
+   * 前提下取的，那时 3012 掩盖了版本闸门。
+   */
   assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.16.3' }), ZCODE_VERSION_GATED_MIN_APP_VERSION)
-  assert.equal(ZCODE_VERSION_GATED_MIN_APP_VERSION, '3.17.2')
+  assert.equal(ZCODE_VERSION_GATED_MIN_APP_VERSION, '3.19.0')
   /** 凭据更新 → 用它自己的版本（向前兼容，不降级）。 */
-  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.18.0' }), '3.18.0')
+  assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.20.0' }), '3.20.0')
   /** 缺失/脏值 → 门控下限（脏值还会让 Headers() 抛 TypeError，必须挡住）。 */
   assert.equal(zcodeVersionGatedAppVersion({}), ZCODE_VERSION_GATED_MIN_APP_VERSION)
   assert.equal(zcodeVersionGatedAppVersion({ app_version: '3.16.3-beta.1' }), ZCODE_VERSION_GATED_MIN_APP_VERSION)
